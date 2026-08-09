@@ -1,0 +1,6 @@
+logging:
+  level: INFO
+  log_directory: logs
+  log_file: system.log
+  max_file_size: 1048576
+  backup_count: 5
