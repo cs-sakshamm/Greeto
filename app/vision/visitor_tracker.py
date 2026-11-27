@@ -1,7 +1,7 @@
 """
 Visitor Tracker.
 
-Assigns stable visitor IDs across consecutive frames using
+Assigns stable, unique visitor IDs across consecutive frames using
 simple centroid tracking.
 """
 
@@ -13,7 +13,7 @@ from math import hypot
 from app.vision.models import Face
 
 
-@dataclass(slots=True)
+@dataclass
 class Track:
     """
     Internal tracking state.
@@ -60,6 +60,10 @@ class VisitorTracker:
         """
         Update visitor tracking.
 
+        Every face in one frame gets a distinct ID. A track that was
+        already matched by another face is not reused in the same frame,
+        even when both faces are close together.
+
         Args:
             faces:
                 Faces detected in the current frame.
@@ -77,6 +81,7 @@ class VisitorTracker:
             visitor_id = self._find_best_track(
                 cx,
                 cy,
+                matched_tracks,
             )
 
             if visitor_id is None:
@@ -106,15 +111,22 @@ class VisitorTracker:
         self,
         x: int,
         y: int,
+        excluded: set[int] | None = None,
     ) -> int | None:
         """
-        Find the closest existing track.
+        Find the closest existing track that is not already used.
         """
+
+        excluded = excluded or set()
 
         best_distance = self._max_distance
         best_track = None
 
         for visitor_id, track in self._tracks.items():
+
+            if visitor_id in excluded:
+
+                continue
 
             distance = hypot(
                 track.center_x - x,
@@ -135,6 +147,9 @@ class VisitorTracker:
     ) -> int:
         """
         Create a new visitor track.
+
+        IDs increase monotonically for the lifetime of the tracker, so
+        an expired ID is never handed to a different person.
         """
 
         visitor_id = self._next_visitor_id
@@ -178,11 +193,13 @@ class VisitorTracker:
         for visitor_id, track in self._tracks.items():
 
             if visitor_id in matched_tracks:
+
                 continue
 
             track.missing_frames += 1
 
             if track.missing_frames > self._max_missing_frames:
+
                 expired.append(visitor_id)
 
         for visitor_id in expired:
@@ -191,6 +208,9 @@ class VisitorTracker:
     def clear(self) -> None:
         """
         Reset the tracker.
+
+        IDs restart at 1 because this is a new tracking session; within
+        a session they are never reused.
         """
 
         self._tracks.clear()

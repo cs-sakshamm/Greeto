@@ -10,6 +10,10 @@ from pathlib import Path
 import numpy as np
 
 
+# Repository root, independent of the current working directory.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
 class FaceCache:
     """
     Saves and loads face embeddings.
@@ -20,7 +24,13 @@ class FaceCache:
         cache_file: str = "models/cache/face_embeddings.pkl",
     ) -> None:
 
-        self.cache_file = Path(cache_file)
+        cache_file = Path(cache_file)
+
+        if not cache_file.is_absolute():
+
+            cache_file = PROJECT_ROOT / cache_file
+
+        self.cache_file = cache_file
 
         self.cache_file.parent.mkdir(
             parents=True,

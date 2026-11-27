@@ -1,49 +1,93 @@
-from PySide6.QtGui import QColor
+"""
+Application Theme
+PyQt5
+"""
 
-WINDOW_BG = "#0B1220"
+# Style used by the previous card-based interface. Kept so any older
+# caller that imports STYLE keeps working; the kiosk uses KIOSK_STYLE.
+STYLE = """
+*{
+    font-family: "Segoe UI";
+    color:white;
+}
 
-CARD_BG = "#151E2F"
+QMainWindow{
+    background:#0D1117;
+}
 
-CARD_BG2 = "#101827"
+QWidget{
+    background:#0D1117;
+}
 
-TEXT = "#FFFFFF"
-
-ACCENT = "#3B82F6"
-
-STYLE = f"""
-
-QMainWindow{{
-    background:{WINDOW_BG};
-}}
-
-QWidget{{
-    background:{WINDOW_BG};
-    color:{TEXT};
-    font-family:Segoe UI;
-    font-size:14px;
-}}
-
-QFrame{{
-    background:{CARD_BG};
+QFrame#RobotCard{
+    background:#0D1117;
     border:none;
-    border-radius:22px;
-}}
+}
 
-QLabel{{
+QLabel#Caption{
+
+    font-size:28px;
+
+    font-weight:500;
+
+    color:white;
+
+    padding:20px;
+
     background:transparent;
-    color:white;
-}}
+}
 
-QTextEdit{{
-    background:{CARD_BG};
+QLabel#Robot{
+
+    background:transparent;
+}
+
+QLabel{
+
+    background:transparent;
+}
+
+QPushButton{
+
     border:none;
-    border-radius:18px;
-    padding:15px;
-    color:white;
-}}
 
-QScrollBar:vertical{{
-    width:0px;
-}}
+    background:#2563EB;
 
+    border-radius:12px;
+
+    padding:10px;
+
+    font-size:16px;
+}
+
+QPushButton:hover{
+
+    background:#3B82F6;
+}
+
+QPushButton:pressed{
+
+    background:#1D4ED8;
+}
+"""
+
+
+# Kiosk style. Deliberately minimal: the background is painted by
+# KioskBackground and the face by RobotWidget, so every QWidget that is
+# not one of those only needs a transparent background.
+KIOSK_STYLE = """
+QMainWindow{
+    background:#05080D;
+}
+
+QWidget{
+    background:transparent;
+    font-family:"Segoe UI";
+    color:#C7DAE6;
+}
+
+QLabel{
+    background:transparent;
+    color:#C7DAE6;
+}
 """

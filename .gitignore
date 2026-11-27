@@ -17,3 +17,39 @@ models/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Python bytecode
+*.pyo
+
+# Test and build artefacts
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+
+# Local secrets
+.env
+
+# Generated retrieval index and fine-tuning datasets
+# (rebuilt automatically from knowledge_base/ by app/brain/vector_store.py)
+data/vector_index/
+data/qwen25_train.jsonl
+data/qwen25_val.jsonl
+
+# Runtime visitor database and one-time legacy archives
+data/*.db
+data/*.db-*
+data/*.json.migrated
+data/*.json.migrated.*
+data/*.json.invalid
+data/*.json.invalid.*
+
+# JetBrains
+.idea/
+
+# Runtime logs
+logs/
+
+# Phase 1 face preview / test artefacts
+.face_tmp/
+.stability.log

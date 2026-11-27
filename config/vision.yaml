@@ -1,0 +1,61 @@
+# Recognition settings (Phase 3, Milestone 2).
+#
+# threshold is cosine similarity: 1.0 is identical, 0.55 is the
+# existing Greeto default. Run scripts/calibrate_threshold.py once at
+# least two identities with several photos each are enrolled; without
+# impostor pairs the script cannot estimate a data-driven threshold and
+# keeps this value.
+recognition:
+
+  threshold: 0.55
+
+  # Faces below either gate are tracked but never compared, so a blurry
+  # or tiny detection cannot produce a confident wrong match.
+  min_detection_score: 0.55
+  min_face_size: 60
+
+  # InsightFace buffalo_l produces 512 values per embedding. Change this
+  # only when the model pack changes.
+  expected_embedding_size: 512
+
+  # Reject effectively zero-length or non-finite vectors. Embeddings are
+  # normalised to length 1.0, so this must stay below 1.0.
+  min_embedding_norm: 0.5
+
+  # L2-normalise vectors before comparison and caching.
+  normalize_embeddings: true
+
+# Visitor statistics (Phase 3, Milestone 3).
+#
+# SQLite replaces the old JSON file. On first use, identities in the
+# legacy file are imported without its visit counters, because those
+# counters were incremented on every detection cycle. The legacy file
+# is then archived as visitors.json.migrated.
+visitors:
+
+  database_path: data/visitors.db
+
+  legacy_json: data/visitors.json
+
+# Visitor session lifecycle (Phase 3, Milestone 4).
+#
+# A track that disappears is only departed after this grace period, so a
+# dropped frame or a brief occlusion does not end the session. A sitting
+# lasts longer: the same recognized person is greeted once and is not
+# greeted again until they have been absent for absence_timeout_s.
+sessions:
+
+  grace_period_seconds: 5.0
+
+greeting:
+
+  enabled: true
+
+  # Once a known person is greeted, the sitting stays open until they
+  # have been unseen for this long. Tracker flicker, bbox jitter and
+  # periodic re-recognition inside this window are all the same sitting.
+  absence_timeout_s: 20.0
+
+  # null follows recognition.threshold. Set a higher value to require
+  # even stronger confidence before a greeting is spoken.
+  min_confidence: null

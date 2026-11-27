@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import cv2
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtWidgets import QLabel
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import QLabel
 
 from app.vision.vision_service import VisionService
 

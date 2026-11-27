@@ -1,0 +1,916 @@
+"""Embedded vector store for the Greeto knowledge base.
+
+The kiosk is offline, so the index has to live on the device and load
+without a server. This module provides:
+
+* deterministic ingestion of ``knowledge_base/`` Markdown/TXT/JSON files
+  (atomic ``[KB-XX-XX]`` records stay whole; tables become spoken prose;
+  private-use citations and HTML/SEO spam are stripped);
+* a small embedded vector index persisted as ``index.npz`` +
+  ``chunks.jsonl`` + ``meta.json`` under a gitignored directory;
+* an optional ``sentence-transformers`` embedder (``BAAI/bge-small-en-v1.5``
+  by default) with a pure-numpy hashed n-gram fallback so the kiosk still
+  works when PyTorch is not installed.
+
+The store is intentionally simple: a fixed-size float32 matrix and an
+exact cosine scan. With a few hundred chunks this is well under the
+15-25 ms retrieval budget on a Jetson CPU, and it removes an entire
+class of index-server failure modes from the kiosk.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import html
+import json
+import logging
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Sequence
+
+import numpy as np
+
+logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+INDEX_VERSION = 1
+DEFAULT_INDEX_DIR = PROJECT_ROOT / "data" / "vector_index"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-en-v1.5"
+HASHING_EMBEDDER_NAME = "hashing-ngram-v1"
+
+_TEXT_SUFFIXES = {".md", ".markdown", ".txt", ".json"}
+_OPTIONAL_SUFFIXES = {".docx", ".pdf"}
+
+# Retrieved Markdown contains private-use citation markers such as
+# \ue200cite\ue202turn0search3\ue201. They are not speakable and would
+# leak into the model's answer, so they are removed at load time.
+_CITATION_PATTERN = re.compile(r"[\ue200-].*?[\ue201]|[\ue000-]", re.DOTALL)
+
+# Blackhat SEO / footer spam found on the public college site. Removing it
+# at ingestion keeps gambling-domain tokens out of the model's context.
+_SPAM_PATTERN = re.compile(
+    r"\b(?:pgslot|slot\s*online|situs\s*slot|judi\s*bola|gacor|maxwin|"
+    r"togel|casino\s*online)\b",
+    re.IGNORECASE,
+)
+
+_HTML_BLOCK_PATTERN = re.compile(
+    r"<(script|style|noscript)\b[^>]*>.*?</\1>",
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_PATTERN = re.compile(r"<[^>]+>")
+_CONTROL_PATTERN = re.compile(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f]")
+
+_QA_PATTERN = re.compile(
+    r"\[(KB-\d{2}-\d{2})\]\s*Q:\s*(.*?)\s*A:\s*(.*?)(?=\[KB-\d{2}-\d{2}\]|\Z)",
+    re.DOTALL,
+)
+
+_HEADING_PATTERN = re.compile(
+    r"(?m)^\s{0,3}(#{1,6})\s+(.*?)\s*$",
+)
+
+# Reference tables in the source document quote third-party aggregator
+# estimates that contradict the official figures. They must never reach the
+# retrieval store: the helpline answer is better than an unverified number.
+_UNVERIFIED_AGGREGATOR_PATTERN = re.compile(
+    r"\b(?:Collegedunia|Caderaedu|Dialeducation|Admissionsetu|CollegeDekho|"
+    r"Shiksha|Dakhilapoint)\b",
+    re.IGNORECASE,
+)
+
+# Reconciliation / audit prose is useful to a human reviewer but is full of
+# contradictory third-party estimates and table fragments. It is not an
+# answer source for the kiosk.
+_REFERENCE_ONLY_PATTERN = re.compile(
+    r"Third-Party Aggregators|reject outliers|Ground-Truth Policy|Cross-Source "
+    r"Data Reconciliation|Reference Only",
+    re.IGNORECASE,
+)
+
+_TABLE_SEPARATOR = re.compile(r"^\s*\|?[\s:|-]+\|[\s:|-]*$")
+
+_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])\s+|\n+")
+
+# Section titles for the atomic Q&A corpus. The records carry only
+# [KB-XX-YY], so the group number is mapped back to the source section.
+_QA_SECTIONS = {
+    "01": "Greeto Identity, Offline Architecture, and Escalation Protocol",
+    "02": "College Overview, Location, Leadership, and Official Directory",
+    "03": "Approvals, NBA and NAAC Accreditations, Rankings, and Awards",
+    "04": "Academic Programs, Sanctioned Intake, Honours, and Minor Degrees",
+    "05": "Department Profiles, Career Outcomes, and Skill Training",
+    "06": "Admission Pathways, Eligibility, Entrance Exams, and Cutoffs",
+    "07": "Admission Document Checklist and Verification Rules",
+    "08": "Fee Structure, Discounts, Bank Account, and Refund Rules",
+    "09": "Scholarships, Financial Aid, and Education Loans",
+    "10": "Placements, Corporate Resource Centre, Soft Skills, and Recruiters",
+    "11": "Specialized Labs, Centers of Excellence, and Startup Incubation",
+    "12": "Campus Infrastructure, Library, Hostels, Sports, and Student Life",
+    "13": "Academic Regulations, Attendance, Exams, Grading, and Committees",
+}
+
+
+@dataclass
+class KBChunk:
+    """One retrievable unit of college knowledge."""
+
+    chunk_id: str
+    source: str
+    section: str
+    text: str
+    qa_id: str | None = None
+    kind: str = "narrative"
+
+    def to_dict(self) -> dict:
+        return {
+            "chunk_id": self.chunk_id,
+            "source": self.source,
+            "section": self.section,
+            "text": self.text,
+            "qa_id": self.qa_id,
+            "kind": self.kind,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "KBChunk":
+        return cls(
+            chunk_id=str(data.get("chunk_id") or ""),
+            source=str(data.get("source") or ""),
+            section=str(data.get("section") or ""),
+            text=str(data.get("text") or ""),
+            qa_id=data.get("qa_id"),
+            kind=str(data.get("kind") or "narrative"),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Text cleaning and chunking
+# ---------------------------------------------------------------------------
+
+
+def strip_citations(text: str) -> str:
+    """Remove private-use citation markers from knowledge text."""
+
+    if not text:
+        return text
+
+    cleaned = _CITATION_PATTERN.sub("", text)
+
+    return re.sub(r"[ \t]+", " ", cleaned)
+
+
+def clean_text(text: str) -> str:
+    """Normalise raw institutional text for indexing.
+
+    Strips HTML blocks/tags, SEO spam, control characters and the
+    private-use citation markers that otherwise leak into the prompt.
+    """
+
+    if not text:
+        return ""
+
+    cleaned = _HTML_BLOCK_PATTERN.sub(" ", text)
+    cleaned = _HTML_TAG_PATTERN.sub(" ", cleaned)
+    cleaned = html.unescape(cleaned)
+    cleaned = strip_citations(cleaned)
+    cleaned = _CONTROL_PATTERN.sub("", cleaned)
+    cleaned = cleaned.replace("\ufeff", "").replace("\u200b", "")
+    cleaned = _SPAM_PATTERN.sub(" ", cleaned)
+
+    # Keep paragraph breaks but collapse the long runs of spaces that
+    # PDF/Word extraction leaves behind.
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in cleaned.splitlines()]
+
+    return "\n".join(lines).strip()
+
+
+def _split_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def tables_to_prose(text: str) -> str:
+    """Convert Markdown pipe tables into spoken-friendly sentences."""
+
+    if "|" not in text:
+        return text
+
+    output: list[str] = []
+    table: list[str] = []
+
+    def flush() -> None:
+        if not table:
+            return
+
+        rows = [_split_table_row(line) for line in table]
+        table.clear()
+
+        if not rows:
+            return
+
+        headers = rows[0]
+        body = [
+            row
+            for row in rows[1:]
+            if row and not _TABLE_SEPARATOR.match("|".join(row))
+        ]
+
+        for row in body:
+            pairs = []
+            for index, cell in enumerate(row):
+                if not cell or cell in {"-", "—"}:
+                    continue
+                header = headers[index] if index < len(headers) else ""
+                pairs.append(
+                    "%s is %s" % (header, cell) if header else cell
+                )
+            if pairs:
+                output.append(". ".join(pairs).rstrip(".") + ".")
+
+    for line in text.splitlines():
+        if line.lstrip().startswith("|"):
+            table.append(line)
+        else:
+            flush()
+            output.append(line)
+
+    flush()
+
+    return "\n".join(output)
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split prose into sentence-like units without breaking decimals."""
+
+    candidates = [part.strip() for part in _SENTENCE_BOUNDARY.split(text) if part.strip()]
+
+    # Repair splits caused by decimals and common abbreviations ("Rs. 500").
+    result: list[str] = []
+    for candidate in candidates:
+        if result and re.search(
+            r"(?:\b(?:rs|inr|dr|mr|mrs|ms|no|approx|e\.g|i\.e)\.|"
+            r"\b\d+\.)$",
+            result[-1],
+            re.IGNORECASE,
+        ):
+            result[-1] = result[-1] + " " + candidate
+        else:
+            result.append(candidate)
+
+    return result
+
+
+def chunk_narrative(
+    text: str,
+    source: str,
+    section: str,
+    max_chars: int = 750,
+    overlap_sentences: int = 1,
+) -> list[KBChunk]:
+    """Group narrative prose into sentence-bounded retrievable chunks."""
+
+    sentences = split_sentences(text)
+
+    chunks: list[KBChunk] = []
+    current: list[str] = []
+    current_len = 0
+
+    def emit() -> None:
+        nonlocal current, current_len
+
+        body = " ".join(current).strip()
+
+        if body:
+            digest = hashlib.sha1(
+                (source + "\n" + section + "\n" + body).encode("utf-8")
+            ).hexdigest()[:16]
+            chunks.append(
+                KBChunk(
+                    chunk_id="n-" + digest,
+                    source=source,
+                    section=section,
+                    text=body,
+                    kind="narrative",
+                )
+            )
+
+        # Carry the last sentence into the next window for context.
+        if overlap_sentences > 0 and current:
+            current = current[-overlap_sentences:]
+            current_len = len(" ".join(current))
+        else:
+            current = []
+            current_len = 0
+
+    for sentence in sentences:
+        if len(sentence) > max_chars:
+            # Very long PDF paragraphs: hard-wrap on word boundaries.
+            words = sentence.split()
+            piece: list[str] = []
+            piece_len = 0
+            for word in words:
+                if piece_len + len(word) + 1 > max_chars and piece:
+                    current.append(" ".join(piece))
+                    piece = []
+                    piece_len = 0
+                    emit()
+                piece.append(word)
+                piece_len += len(word) + 1
+            if piece:
+                sentence = " ".join(piece)
+
+        if current and current_len + len(sentence) + 1 > max_chars:
+            emit()
+
+        current.append(sentence)
+        current_len += len(sentence) + 1
+
+    if current:
+        emit()
+
+    # The overlap carry can leave a trailing duplicate of the last chunk.
+    deduped: list[KBChunk] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        if chunk.text in seen:
+            continue
+        seen.add(chunk.text)
+        deduped.append(chunk)
+
+    return deduped
+
+
+def _narrative_sections(text: str, source: str) -> list[tuple[str, str]]:
+    """Return (section title, body) pairs for narrative prose."""
+
+    sections: list[tuple[str, str]] = []
+    current_title = Path(source).stem.replace("_", " ").title()
+    body: list[str] = []
+
+    for line in text.splitlines():
+        heading = _HEADING_PATTERN.match(line)
+        if heading:
+            if body:
+                sections.append((current_title, "\n".join(body)))
+                body = []
+            current_title = heading.group(2).strip() or current_title
+            continue
+        body.append(line)
+
+    if body:
+        sections.append((current_title, "\n".join(body)))
+
+    # The supplied corpus places many "2.3 ..." headings inline in one
+    # long paragraph, so split those too.
+    expanded: list[tuple[str, str]] = []
+    for title, section_body in sections:
+        pieces = re.split(
+            r"(?=\b\d{1,2}\.\d{1,2}\s+"
+            r"(?!(?i:lakhs?|lacs?|crores?|thousand|percent|lpa|seconds?|ms|"
+            r"minutes?|hours?|days?|years?)\b)[A-Z])",
+            section_body,
+        )
+        for piece in pieces:
+            cleaned = piece.strip()
+            if not cleaned:
+                continue
+            match = re.match(
+                r"(\d{1,2}\.\d{1,2}\s+"
+                r"(?!(?i:lakhs?|lacs?|crores?|thousand|percent|lpa|seconds?|ms|"
+                r"minutes?|hours?|days?|years?)\b)[A-Z][^.]{0,90})",
+                cleaned,
+            )
+            piece_title = match.group(1).strip() if match else title
+            expanded.append((piece_title, cleaned))
+
+    return expanded
+
+
+def load_chunks_from_text(text: str, source: str) -> list[KBChunk]:
+    """Turn one document's text into atomic Q&A and narrative chunks."""
+
+    cleaned = tables_to_prose(clean_text(text))
+
+    chunks: list[KBChunk] = []
+    records = list(_QA_PATTERN.finditer(cleaned))
+
+    for match in records:
+        qa_id, question, answer = match.groups()
+        question = re.sub(r"\s+", " ", question).strip()
+        answer = re.sub(r"\s+", " ", answer).strip().rstrip("\n")
+
+        # The source file places the next section heading immediately after
+        # the last answer in a section ("...0840.3.7 Admission Checklist").
+        # It belongs to the document structure, not to the answer.
+        answer = re.sub(
+            r"(?:^|(?<=[.!?]))\s*\d{1,2}(?:\.\d{1,2})?\s+[A-Z][^.!?]{3,400}$",
+            "",
+            answer,
+        ).strip()
+
+        # The final Q&A record is followed by the "4. ..." gap-analysis
+        # section, whose prose contains decimal points that defeat the
+        # generic heading pattern above.
+        answer = re.sub(
+            r"\s*\d{1,2}\.\s+Identified Website Knowledge Gaps.*$",
+            "",
+            answer,
+            flags=re.DOTALL,
+        ).strip()
+
+        if not question or not answer:
+            continue
+
+        group = qa_id.split("-")[1]
+        section = _QA_SECTIONS.get(group, "College knowledge")
+
+        chunks.append(
+            KBChunk(
+                chunk_id="qa-" + qa_id.replace("[", "").replace("]", "").lower(),
+                source=source,
+                section=section,
+                text="Q: %s\nA: %s" % (question, answer),
+                qa_id=qa_id,
+                kind="qa",
+            )
+        )
+
+    narrative = _QA_PATTERN.sub(" ", cleaned)
+
+    for section, body in _narrative_sections(narrative, source):
+        chunks.extend(
+            chunk_narrative(
+                body,
+                source=source,
+                section=section,
+            )
+        )
+
+    # Identical prose can appear in the manual and the Q&A summary; keep
+    # one copy so RRF is not dominated by duplicates. Chunks that quote
+    # unverified aggregator estimates are dropped entirely.
+    seen: set[str] = set()
+    deduped: list[KBChunk] = []
+    for chunk in chunks:
+        key = re.sub(r"\s+", " ", chunk.text).strip().casefold()
+        if not key or key in seen:
+            continue
+        # Atomic Q&A answers are official even when they mention an
+        # aggregator by name (for example a Collegedunia award). Only
+        # narrative comparison prose is excluded.
+        if chunk.kind != "qa" and (
+            _UNVERIFIED_AGGREGATOR_PATTERN.search(chunk.section + " " + chunk.text)
+            or _REFERENCE_ONLY_PATTERN.search(chunk.section + " " + chunk.text)
+        ):
+            continue
+        seen.add(key)
+        deduped.append(chunk)
+
+    return deduped
+
+
+def _read_optional_document(file: Path) -> str:
+    """Extract text from DOCX/PDF when the optional reader is installed."""
+
+    suffix = file.suffix.lower()
+
+    if suffix == ".docx":
+        try:
+            import docx  # type: ignore
+        except ImportError:
+            logger.debug("python-docx not installed; skipping %s", file)
+            return ""
+
+        try:
+            document = docx.Document(str(file))
+            parts = [paragraph.text for paragraph in document.paragraphs]
+            for table in document.tables:
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            return "\n".join(parts)
+        except Exception as error:  # noqa: BLE001 - optional reader
+            logger.warning("Could not read DOCX %s: %s", file, error)
+            return ""
+
+    if suffix == ".pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except ImportError:
+            logger.debug("pypdf not installed; skipping %s", file)
+            return ""
+
+        try:
+            reader = PdfReader(str(file))
+            return "\n".join(
+                page.extract_text() or "" for page in reader.pages
+            )
+        except Exception as error:  # noqa: BLE001 - optional reader
+            logger.warning("Could not read PDF %s: %s", file, error)
+            return ""
+
+    return ""
+
+
+def load_chunks(source: str | Path) -> list[KBChunk]:
+    """Load every supported document below *source* into chunks."""
+
+    path = Path(source)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+
+    if not path.exists():
+        logger.warning("Knowledge source not found: %s", path)
+        return []
+
+    supported = _TEXT_SUFFIXES | _OPTIONAL_SUFFIXES
+    files: list[Path]
+    if path.is_file():
+        files = [path]
+    else:
+        files = sorted(
+            file
+            for file in path.rglob("*")
+            if file.is_file() and file.suffix.lower() in supported
+        )
+
+    chunks: list[KBChunk] = []
+    for file in files:
+        if file.suffix.lower() in _OPTIONAL_SUFFIXES:
+            raw = _read_optional_document(file)
+        else:
+            try:
+                raw = file.read_text(encoding="utf-8", errors="ignore")
+            except OSError as error:  # pragma: no cover - unreadable file
+                logger.warning("Could not read %s: %s", file, error)
+                continue
+
+        if not raw.strip():
+            continue
+
+        try:
+            chunks.extend(load_chunks_from_text(raw, source=file.name))
+        except Exception as error:  # pragma: no cover - malformed document
+            logger.warning("Could not parse %s: %s", file, error)
+
+    # Markdown and DOCX often contain the same corpus. Collapse duplicates
+    # so the vector index does not contain two copies of every Q&A.
+    seen: set[str] = set()
+    unique: list[KBChunk] = []
+    for chunk in chunks:
+        key = re.sub(r"\s+", " ", chunk.text).strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(chunk)
+
+    logger.info("Loaded %d knowledge chunks from %s", len(unique), path)
+    return unique
+
+
+# ---------------------------------------------------------------------------
+# Embedders
+# ---------------------------------------------------------------------------
+
+
+class HashingEmbedder:
+    """Dependency-free hashed n-gram embedder.
+
+    This is not a semantic transformer, but it is a real fixed-size dense
+    representation: word unigrams/bigrams plus character n-grams are
+    signed-hashed into a normalised vector. It keeps exact identifiers
+    (phone numbers, IFSC codes, fees) and tolerates ASR spelling noise
+    far better than the lexical scorer alone, and it needs no download.
+    """
+
+    name = HASHING_EMBEDDER_NAME
+
+    def __init__(self, dim: int = 384) -> None:
+        self.dim = max(64, int(dim))
+
+    @staticmethod
+    def _tokens(text: str) -> Iterable[tuple[str, float]]:
+        lowered = (text or "").casefold()
+        # Keep numeric/identifier tokens intact: 1800-180-0840, 2,56,500,
+        # CNRB0018556, 49 lpa.
+        words = re.findall(r"[a-z0-9][a-z0-9,./-]*", lowered)
+
+        for word in words:
+            token = word.strip(",./-")
+            if len(token) < 2:
+                continue
+            yield token, 1.0
+            compact = re.sub(r"[^a-z0-9]", "", token)
+            if len(compact) >= 5:
+                for size in (3, 4):
+                    for index in range(len(compact) - size + 1):
+                        yield compact[index : index + size], 0.25
+
+        for left, right in zip(words, words[1:]):
+            yield left + " " + right, 0.6
+
+    def _bucket(self, token: str) -> tuple[int, float]:
+        digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+        value = int.from_bytes(digest, "little")
+        sign = 1.0 if (value >> 63) & 1 else -1.0
+        return value % self.dim, sign
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        matrix = np.zeros((len(texts), self.dim), dtype=np.float32)
+
+        for row, text in enumerate(texts):
+            for token, weight in self._tokens(text):
+                bucket, sign = self._bucket(token)
+                matrix[row, bucket] += sign * weight
+
+            norm = float(np.linalg.norm(matrix[row]))
+            if norm > 0:
+                matrix[row] /= norm
+
+        return matrix
+
+    def encode_query(self, text: str) -> np.ndarray:
+        return self.encode([text])[0]
+
+
+class SentenceTransformerEmbedder:
+    """Optional transformer embedder, loaded lazily from local cache."""
+
+    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL, device: str = "cpu") -> None:
+        from sentence_transformers import SentenceTransformer
+
+        self.name = model_name
+        self.device = device
+        self._model = SentenceTransformer(model_name, device=device)
+        self.dim = int(self._model.get_sentence_embedding_dimension())
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        vectors = self._model.encode(
+            list(texts),
+            batch_size=32,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        return np.asarray(vectors, dtype=np.float32)
+
+    def encode_query(self, text: str) -> np.ndarray:
+        if "bge" in self.name.casefold():
+            text = "Represent this sentence for searching relevant passages: " + text
+        return self.encode([text])[0]
+
+
+def build_embedder(
+    backend: str = "auto",
+    model_name: str = DEFAULT_EMBEDDING_MODEL,
+    hashing_dim: int = 384,
+):
+    """Create the configured embedder, falling back to hashing.
+
+    ``backend`` may be ``auto``, ``sentence-transformers`` or ``hashing``.
+    An explicit ``sentence-transformers`` request raises when the optional
+    dependency is missing; ``auto`` silently uses hashing instead.
+    """
+
+    backend = (backend or "auto").strip().lower()
+
+    if backend in {"hashing", "hash", "fallback"}:
+        return HashingEmbedder(hashing_dim)
+
+    try:
+        return SentenceTransformerEmbedder(model_name)
+    except Exception as error:  # noqa: BLE001 - optional dependency/model
+        if backend in {"sentence-transformers", "st", "transformer"}:
+            raise
+        logger.info(
+            "sentence-transformers unavailable (%s); using the hashed "
+            "n-gram embedder.",
+            error,
+        )
+        return HashingEmbedder(hashing_dim)
+
+
+def embedder_from_meta(meta: dict):
+    """Recreate the embedder recorded in an index's metadata."""
+
+    name = str(meta.get("embedder") or HASHING_EMBEDDER_NAME)
+    dim = int(meta.get("dim") or 384)
+
+    if name == HASHING_EMBEDDER_NAME:
+        return HashingEmbedder(dim)
+
+    return SentenceTransformerEmbedder(name)
+
+
+# ---------------------------------------------------------------------------
+# Vector index
+# ---------------------------------------------------------------------------
+
+
+def corpus_hash(chunks: Sequence[KBChunk]) -> str:
+    digest = hashlib.sha256()
+    for chunk in chunks:
+        digest.update(chunk.chunk_id.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(chunk.text.encode("utf-8"))
+        digest.update(b"\x01")
+    return digest.hexdigest()
+
+
+class VectorStore:
+    """A fixed-size dense matrix over :class:`KBChunk` records."""
+
+    def __init__(
+        self,
+        chunks: Sequence[KBChunk],
+        vectors: np.ndarray,
+        embedder,
+        meta: dict | None = None,
+    ) -> None:
+        if len(chunks) != len(vectors):
+            raise ValueError("chunk/vector count mismatch")
+
+        self.chunks = list(chunks)
+        self.vectors = np.asarray(vectors, dtype=np.float32)
+        self.embedder = embedder
+        self.meta = dict(meta or {})
+        self.meta.setdefault("embedder", getattr(embedder, "name", HASHING_EMBEDDER_NAME))
+        self.meta.setdefault("dim", int(self.vectors.shape[1]) if self.vectors.ndim == 2 else 0)
+        self.meta.setdefault("count", len(self.chunks))
+        self.meta.setdefault("corpus_hash", corpus_hash(self.chunks))
+        self.meta.setdefault("version", INDEX_VERSION)
+
+    def __len__(self) -> int:
+        return len(self.chunks)
+
+    def search(
+        self,
+        query: str,
+        top_k: int = 8,
+        min_similarity: float = 0.0,
+    ) -> list[tuple[float, KBChunk]]:
+        """Return ``(cosine similarity, chunk)`` pairs, best first."""
+
+        if not query.strip() or not self.chunks:
+            return []
+
+        query_vector = np.asarray(
+            self.embedder.encode_query(query),
+            dtype=np.float32,
+        )
+
+        if query_vector.shape[0] != self.vectors.shape[1]:
+            logger.warning(
+                "Query embedding dimension %d does not match index %d",
+                query_vector.shape[0],
+                self.vectors.shape[1],
+            )
+            return []
+
+        scores = self.vectors @ query_vector
+
+        count = min(max(1, top_k), len(scores))
+        if count < len(scores):
+            candidates = np.argpartition(scores, -count)[-count:]
+        else:
+            candidates = np.arange(len(scores))
+
+        ordered = sorted(candidates, key=lambda index: float(scores[index]), reverse=True)
+
+        results: list[tuple[float, KBChunk]] = []
+        for index in ordered:
+            score = float(scores[index])
+            if score < min_similarity:
+                continue
+            results.append((score, self.chunks[int(index)]))
+
+        return results
+
+    # -- persistence ------------------------------------------------------
+
+    def save(self, index_dir: str | Path) -> Path:
+        directory = Path(index_dir)
+        if not directory.is_absolute():
+            directory = PROJECT_ROOT / directory
+        directory.mkdir(parents=True, exist_ok=True)
+
+        meta = dict(self.meta)
+        meta.update(
+            {
+                "version": INDEX_VERSION,
+                "embedder": getattr(self.embedder, "name", HASHING_EMBEDDER_NAME),
+                "dim": int(self.vectors.shape[1]),
+                "count": len(self.chunks),
+                "corpus_hash": corpus_hash(self.chunks),
+            }
+        )
+
+        vectors_tmp = directory / "index.npz.tmp.npz"
+        np.savez_compressed(vectors_tmp, vectors=self.vectors)
+        os.replace(vectors_tmp, directory / "index.npz")
+
+        chunks_tmp = directory / "chunks.jsonl.tmp"
+        with chunks_tmp.open("w", encoding="utf-8", newline="\n") as handle:
+            for chunk in self.chunks:
+                handle.write(json.dumps(chunk.to_dict(), ensure_ascii=False) + "\n")
+        os.replace(chunks_tmp, directory / "chunks.jsonl")
+
+        # meta.json is written last and acts as the commit marker.
+        meta_tmp = directory / "meta.json.tmp"
+        meta_tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        os.replace(meta_tmp, directory / "meta.json")
+
+        return directory
+
+    @classmethod
+    def load(cls, index_dir: str | Path, embedder=None) -> "VectorStore | None":
+        directory = Path(index_dir)
+        if not directory.is_absolute():
+            directory = PROJECT_ROOT / directory
+
+        meta_path = directory / "meta.json"
+        chunks_path = directory / "chunks.jsonl"
+        vectors_path = directory / "index.npz"
+
+        if not (meta_path.exists() and chunks_path.exists() and vectors_path.exists()):
+            return None
+
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if int(meta.get("version", 0)) != INDEX_VERSION:
+                logger.info("Vector index version changed; rebuild required.")
+                return None
+
+            chunks = [
+                KBChunk.from_dict(json.loads(line))
+                for line in chunks_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+            with np.load(vectors_path) as archive:
+                vectors = np.asarray(archive["vectors"], dtype=np.float32)
+
+            if not chunks or vectors.shape[0] != len(chunks):
+                logger.warning("Vector index is inconsistent; rebuild required.")
+                return None
+
+            if embedder is None:
+                embedder = embedder_from_meta(meta)
+
+            if getattr(embedder, "name", "") != meta.get("embedder"):
+                logger.info(
+                    "Embedder %s does not match index %s; rebuild required.",
+                    getattr(embedder, "name", "?"),
+                    meta.get("embedder"),
+                )
+                return None
+
+            return cls(chunks, vectors, embedder, meta=meta)
+
+        except Exception as error:  # noqa: BLE001 - corrupt index is rebuildable
+            logger.warning("Could not load vector index: %s", error)
+            return None
+
+
+def build_index(
+    chunks: Sequence[KBChunk],
+    index_dir: str | Path,
+    embedder,
+) -> VectorStore:
+    """Embed *chunks*, persist the index, and return the loaded store."""
+
+    if not chunks:
+        raise ValueError("cannot build an index with no chunks")
+
+    texts = [chunk.text for chunk in chunks]
+    vectors = embedder.encode(texts)
+    store = VectorStore(chunks, vectors, embedder)
+
+    store.save(index_dir)
+
+    return store
+
+
+def index_is_current(index_dir: str | Path, chunks: Sequence[KBChunk]) -> bool:
+    """Return True when the persisted index matches *chunks*."""
+
+    directory = Path(index_dir)
+    if not directory.is_absolute():
+        directory = PROJECT_ROOT / directory
+
+    meta_path = directory / "meta.json"
+    if not meta_path.exists():
+        return False
+
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+
+    return (
+        int(meta.get("version", 0)) == INDEX_VERSION
+        and meta.get("corpus_hash") == corpus_hash(chunks)
+    )

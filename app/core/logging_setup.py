@@ -27,7 +27,10 @@ class LoggerManager:
     def create_logger(self, name: str) -> logging.Logger:
         """Create or return a configured logger."""
 
-        self.log_directory.mkdir(exist_ok=True)
+        self.log_directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
         logger = logging.getLogger(name)
 
@@ -35,6 +38,9 @@ class LoggerManager:
             return logger
 
         logger.setLevel(self.level)
+
+        # Do not duplicate records through the root logger.
+        logger.propagate = False
 
         formatter = logging.Formatter(
             "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"

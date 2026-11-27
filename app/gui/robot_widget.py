@@ -1,79 +1,191 @@
+"""
+Greeto's animated digital face widget.
+
+The mascot is drawn entirely with QPainter - eyes, pupils, eyelids,
+eyebrows and mouth are separate pieces of geometry driven by a parameter
+object. No image, SVG, GIF or video asset is used to build the face.
+
+The public state API is unchanged from the previous implementation, so
+MainWindow (and any future caller) keeps working as before.
+"""
+
 from __future__ import annotations
 
-from pathlib import Path
+from PyQt5.QtCore import QSize, Qt
+from PyQt5.QtGui import QPainter
+from PyQt5.QtWidgets import QSizePolicy, QWidget
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QLabel, QSizePolicy
+from app.gui.face_animation import FaceAnimator
+from app.gui.face_renderer import FaceRenderer
 
 
-class RobotWidget(QLabel):
+class RobotWidget(QWidget):
     """
-    Displays the receptionist robot image.
+    Animated digital face.
 
-    Later this widget will support:
-        • Idle animation
-        • Listening animation
-        • Thinking animation
-        • Speaking animation
+    Rendering and animation are deliberately separated:
+
+        RobotWidget  -> owns the QTimer through FaceAnimator
+        FaceAnimator -> produces parameter numbers only
+        FaceRenderer -> draws one frame from those numbers
     """
 
-    def __init__(self):
-        super().__init__()
+    MINIMUM_SIZE = 220
+    PREFERRED_SIZE = 460
 
-        self.setAlignment(Qt.AlignCenter)
+    def __init__(self, parent=None, fps=30):
+        super().__init__(parent)
+
+        self.setAttribute(Qt.WA_StyledBackground, True)
+
+        self.setStyleSheet("""
+        QWidget{
+            background:transparent;
+        }
+        """)
+
+        self.setFocusPolicy(Qt.NoFocus)
+
+        self.setMinimumSize(self.MINIMUM_SIZE, self.MINIMUM_SIZE)
 
         self.setSizePolicy(
             QSizePolicy.Expanding,
             QSizePolicy.Expanding,
         )
 
-        self.setStyleSheet("""
-        QLabel{
-            background:transparent;
-        }
-        """)
+        self._renderer = FaceRenderer()
 
-        self.robot_path = (
-            Path(__file__).resolve().parent.parent.parent
-            / "assets"
-            / "robot.png"
-        )
+        self._animator = FaceAnimator(fps=fps, parent=self)
 
-        self.original_pixmap = None
+        self._animator.frame.connect(self.update)
 
-        self.load_robot()
+        self._animator.set_state("idle")
 
-    def load_robot(self):
+        self._animator.start()
 
-        if self.robot_path.exists():
+    # -----------------------------------------------------
+    # Qt plumbing
+    # -----------------------------------------------------
 
-            self.original_pixmap = QPixmap(str(self.robot_path))
+    def sizeHint(self):
+        return QSize(self.PREFERRED_SIZE, self.PREFERRED_SIZE)
 
-        else:
+    def paintEvent(self, event):
+        """Draw one frame using the current animation parameters."""
 
-            self.setText("")
+        painter = QPainter(self)
 
-            return
+        try:
 
-        self.update_pixmap()
+            self._renderer.paint(
+                painter,
+                self.rect(),
+                self._animator.params,
+            )
 
-    def resizeEvent(self, event):
+        finally:
 
-        super().resizeEvent(event)
+            painter.end()
 
-        self.update_pixmap()
+    def showEvent(self, event):
+        """Resume animation when the face becomes visible."""
 
-    def update_pixmap(self):
+        self._animator.start()
 
-        if self.original_pixmap is None:
-            return
+        super().showEvent(event)
 
-        pix = self.original_pixmap.scaled(
-            int(self.width() * 0.85),
-            int(self.height() * 0.85),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
-        )
+    def hideEvent(self, event):
+        """Pause animation when the face is hidden, to save CPU."""
 
-        self.setPixmap(pix)
+        self._animator.stop()
+
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self.shutdown()
+
+        super().closeEvent(event)
+
+    def shutdown(self):
+        """Stop the animation timer. Safe to call more than once."""
+
+        self._animator.stop()
+
+    # -----------------------------------------------------
+    # State API
+    # -----------------------------------------------------
+
+    def set_state(self, state):
+        """
+        Set the facial expression.
+
+        Unknown state names fall back to ``idle`` instead of raising, and
+        selecting the state that is already active is a no-op.
+        """
+
+        return self._animator.set_state(state)
+
+    def current_state(self):
+        """Return the active state name."""
+
+        return self._animator.state
+
+    def parameters(self):
+        """Expose the current animation parameters (read-only by use)."""
+
+        return self._animator.params
+
+    # -----------------------------------------------------
+
+    def set_idle(self):
+
+        return self.set_state("idle")
+
+    # -----------------------------------------------------
+
+    def set_listening(self):
+
+        return self.set_state("listening")
+
+    # -----------------------------------------------------
+
+    def set_thinking(self):
+
+        return self.set_state("thinking")
+
+    # -----------------------------------------------------
+
+    def set_speaking(self):
+
+        return self.set_state("speaking")
+
+    # -----------------------------------------------------
+
+    def set_happy(self):
+
+        return self.set_state("happy")
+
+    # -----------------------------------------------------
+
+    def set_greeting(self):
+
+        return self.set_state("greeting")
+
+    # -----------------------------------------------------
+
+    def set_confused(self):
+
+        return self.set_state("confused")
+
+    # -----------------------------------------------------
+
+    def set_error(self):
+
+        return self.set_state("error")
+
+    # -----------------------------------------------------
+
+    def load_idle(self):
+        """Legacy alias kept so older call sites keep working."""
+
+        return self.set_state("idle")

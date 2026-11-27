@@ -1,0 +1,22 @@
+# Greeto Qwen 2.5 fine-tuning / GGUF export dependencies.
+#
+# These are NOT needed by the kiosk runtime. Install them in a separate
+# training environment (CUDA GPU recommended, 8 GB+ VRAM for 0.5B QLoRA):
+#
+#     python -m pip install -r training/requirements.txt
+#
+# bitsandbytes is the only package that may need a platform-specific wheel;
+# on Windows install it after a CUDA-enabled torch build.
+
+torch>=2.2
+transformers>=4.44
+datasets>=2.20
+accelerate>=0.33
+peft>=0.12
+trl>=0.9
+bitsandbytes>=0.43
+sentencepiece>=0.2
+
+# Optional: faster 4-bit QLoRA on supported GPUs. Unsloth pins its own
+# torch/transformers versions, so install it in a dedicated environment.
+# unsloth>=2024.8
