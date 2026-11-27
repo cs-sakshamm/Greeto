@@ -1,5 +1,39 @@
 camera:
+  # Preferred device. If it cannot be opened and auto_detect is true,
+  # the manager probes index 0..probe_max_index and uses the first
+  # working device.
   index: 0
+
+  # Requested capture format. The manager verifies what the device
+  # actually delivers and reports a mismatch instead of assuming.
   width: 1280
   height: 720
   fps: 30
+
+  # auto | dshow | v4l2 | any
+  # auto selects DirectShow on Windows and V4L2 on Linux/Jetson,
+  # with a backend-independent open as fallback.
+  backend: auto
+
+  auto_detect: true
+  probe_max_index: 5
+
+  # Frames discarded after opening so auto-exposure/white balance settle.
+  warmup_frames: 5
+
+  # Consecutive failed reads before the capture thread asks the camera
+  # manager to reconnect. At 30 FPS the default is about half a second.
+  read_failures_before_reconnect: 15
+
+  # Pause between reconnect attempts inside the capture thread.
+  reconnect_interval_s: 5.0
+
+  # Pause before retrying while the camera could not be opened at all.
+  # The kiosk keeps running in voice-only mode until this succeeds.
+  open_retry_interval_s: 5.0
+
+  # Maximum time to wait for an in-flight frame read before releasing
+  # the device. A read that cannot be drained safely is logged and the
+  # device is left to the operating system instead of being released
+  # underneath a running read (which can crash the process).
+  release_timeout_s: 0.75

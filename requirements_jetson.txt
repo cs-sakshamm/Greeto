@@ -1,0 +1,108 @@
+# Greeto - Jetson Xavier NX dependencies
+#
+# Target: NVIDIA Jetson Xavier NX, JetPack 5.x / L4T R35.6.0,
+#         Python 3.8.10, aarch64, CUDA 11.4.
+#
+# STATUS: NOT VALIDATED ON PHYSICAL JETSON HARDWARE.
+# Nothing in this file has been installed or run on the device.
+# Entries marked [HARDWARE TEST] must be verified on the device before
+# they are treated as working.
+#
+# Python 3.8.10 cannot be replaced by a newer interpreter on this
+# JetPack image, so every pin below is constrained by 3.8 support.
+# Wheel availability was probed with:
+#   pip download --no-deps --python-version 3.8 --implementation cp \
+#       --abi cp38 --only-binary=:all: --platform manylinux2014_aarch64
+#
+# ---------------------------------------------------------------------------
+# STEP 1 - SYSTEM PACKAGES (apt, outside the virtual environment)
+# ---------------------------------------------------------------------------
+#
+# PyQt5, OpenCV and PortAudio must come from apt, not pip:
+#
+#   * PyQt5 has NO cp38/aarch64 wheel on PyPI (verified: "from versions:
+#     none"). The only practical source on Jetson is the Ubuntu package.
+#   * OpenCV from apt is built against the L4T GStreamer/V4L2 stack.
+#   * sounddevice needs the PortAudio shared library.
+#
+#   sudo apt-get update
+#   sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtsvg
+#   sudo apt-get install -y python3-opencv
+#   sudo apt-get install -y portaudio19-dev
+#   sudo apt-get install -y build-essential cmake python3-dev
+#   sudo apt-get install -y libopenblas-dev liblapack-dev
+#   sudo apt-get install -y alsa-utils          # provides `aplay` for TTS
+#
+# The virtual environment MUST be able to see those apt packages.
+# Without --system-site-packages, `import PyQt5` and `import cv2` fail
+# inside the venv even though both are installed system-wide:
+#
+#   python3 -m venv --system-site-packages .venv-jetson
+#
+# Do not create the venv without that flag and then try to pip install
+# PyQt5 as a workaround: no wheel exists.
+#
+# ---------------------------------------------------------------------------
+# STEP 2 - PIP PACKAGES
+# ---------------------------------------------------------------------------
+
+numpy==1.24.4            # last numpy with cp38/aarch64 wheels (verified;
+                         # 1.26.4 has no cp38 build)
+PyYAML==6.0.1            # cp38/aarch64 wheel verified
+sounddevice==0.4.6       # cp38/aarch64 wheel verified (needs libportaudio2)
+
+# ONNX Runtime. onnxruntime==1.16.3 is the newest cp38/aarch64 wheel that
+# was verified available; 1.19.2 does not publish a cp38 build.
+# The CUDA/TensorRT execution providers are NOT in the PyPI aarch64 wheel -
+# for GPU inference use NVIDIA's Jetson wheel index or build from source.
+onnxruntime==1.16.3      # [HARDWARE TEST]
+
+# Packages below ship as source distributions only (no wheels for
+# cp38/aarch64). Each one compiles native code on the device and the
+# build itself is unverified.
+insightface==0.7.3       # [HARDWARE TEST] Cython/C++ build; needs numpy first
+pywhispercpp==1.5.0      # [HARDWARE TEST] C++ build (whisper.cpp)
+webrtcvad==2.0.10        # [HARDWARE TEST] C extension
+llama-cpp-python==0.3.34 # [HARDWARE TEST] must be built with CUDA enabled
+
+# Text to speech. The application never imports piper as a module - it
+# shells out to the `piper` executable - so any Piper installation that
+# puts `piper` on PATH is sufficient. piper-tts==1.2.0 has a cp38/aarch64
+# wheel; the 1.6.0 version used on Windows is NOT verified for Python 3.8.
+piper-tts==1.2.0         # [HARDWARE TEST]
+
+# Deliberately NOT listed (install through apt in STEP 1):
+#   PyQt5
+#   opencv-python / opencv-contrib-python
+
+# ---------------------------------------------------------------------------
+# STEP 3 - NATIVE BUILD NOTES (all unverified on hardware)
+# ---------------------------------------------------------------------------
+#
+# llama-cpp-python with CUDA for JetPack 5 (CUDA 11.4):
+#
+#   CMAKE_ARGS="-DGGML_CUDA=on" \
+#   FORCE_CMAKE=1 \
+#   pip install --no-cache-dir llama-cpp-python==0.3.34 --no-binary :all:
+#
+# app/brain/llm.py requests n_gpu_layers=-1. With a CPU-only build that
+# value is ignored and inference falls back to CPU (slow but functional).
+#
+# insightface downloads its model pack on first use. The Windows machine
+# uses "buffalo_l" (~/.insightface). Model files are already inside
+# models/ for the other components; the InsightFace pack is not, so the
+# device needs either a one-time network fetch or a manual copy of
+# ~/.insightface/models/buffalo_l.
+#
+# ---------------------------------------------------------------------------
+# STEP 4 - KNOWN JETSON RISKS
+# ---------------------------------------------------------------------------
+#
+# * The Windows machine currently hits a DLL load-order conflict between
+#   PyQt5 and onnxruntime (see docs/PROJECT_AUDIT.md). Whether the same
+#   conflict exists on Jetson with apt PyQt5 + NVIDIA onnxruntime is
+#   unknown and must be tested.
+# * app/brain/llm.py and app/speech/stt.py hardcode n_threads=8.
+#   Xavier NX has 6 CPU cores.
+# * PyQt5 from apt is Qt 5.15.x; the Windows wheel is 5.15.11. Small
+#   API differences are unlikely but untested.

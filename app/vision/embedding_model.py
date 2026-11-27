@@ -4,6 +4,11 @@ Embedding Model.
 Uses InsightFace for:
 1. Face Detection
 2. Face Embedding Generation
+
+Embeddings are validated and L2-normalised at ingestion so every
+consumer (recognition, enrolment and the cache) sees the same
+well-defined vector. Non-finite or zero-length embeddings are dropped
+instead of poisoning the database.
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import numpy as np
 from insightface.app import FaceAnalysis
 
 from app.vision.models import Face
+from app.vision.similarity import normalize_embedding
 
 
 class EmbeddingModel:
@@ -23,7 +29,7 @@ class EmbeddingModel:
 
     Responsibilities:
     - Detect faces
-    - Generate embeddings
+    - Generate valid, normalised embeddings
     """
 
     def __init__(self) -> None:
@@ -45,7 +51,7 @@ class EmbeddingModel:
             image: BGR image from OpenCV.
 
         Returns:
-            List of Face objects.
+            List of Face objects with validated unit-norm embeddings.
         """
 
         insight_faces = self._model.get(image)
@@ -56,13 +62,24 @@ class EmbeddingModel:
 
             x1, y1, x2, y2 = map(int, detected.bbox)
 
+            try:
+
+                embedding = normalize_embedding(detected.embedding)
+
+            except ValueError:
+
+                # A malformed embedding cannot be recognised or stored.
+                # Dropping the face is safer than propagating an array
+                # that would produce nan scores downstream.
+                continue
+
             detected_faces.append(
                 Face(
                     x=x1,
                     y=y1,
                     width=x2 - x1,
                     height=y2 - y1,
-                    embedding=detected.embedding,
+                    embedding=embedding,
                     confidence=float(detected.det_score),
                 )
             )
@@ -71,7 +88,7 @@ class EmbeddingModel:
 
     def generate(self, image: np.ndarray) -> np.ndarray | None:
         """
-        Generate an embedding for the first face in an image.
+        Generate a normalised embedding for the first usable face.
 
         Used by FaceDatabase while building the embeddings cache.
 
@@ -79,7 +96,7 @@ class EmbeddingModel:
             image: BGR image.
 
         Returns:
-            Face embedding or None.
+            Unit-norm embedding or None.
         """
 
         faces = self.detect(image)

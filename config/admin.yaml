@@ -1,0 +1,9 @@
+# Admin PIN for scripts/enroll.py.
+#
+# This stores a salted PBKDF2 hash, never the PIN itself. Set it with:
+#
+#   python scripts/enroll.py set-pin
+#
+# Keep this file private if you add a hash.
+admin:
+  pin_hash: ""

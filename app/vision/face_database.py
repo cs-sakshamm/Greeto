@@ -1,8 +1,12 @@
 """
 Face Database.
 
-Loads known face images, generates embeddings,
-and caches them for faster startup.
+Loads known face images, generates embeddings, and caches them for
+faster startup.
+
+Cache entries are validated before use. A corrupt cache, an empty cache,
+or one containing malformed vectors falls back to regenerating from the
+face folders instead of disabling recognition.
 """
 
 from __future__ import annotations
@@ -14,6 +18,74 @@ import numpy as np
 
 from app.vision.embedding_model import EmbeddingModel
 from app.vision.face_cache import FaceCache
+from app.vision.similarity import normalize_embedding
+
+
+# Repository root, independent of the current working directory.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def sanitize_embeddings(data):
+    """
+    Validate a cached ``{name: [embedding, ...]}`` mapping.
+
+    Returns ``(cleaned_mapping, rejected_count)``. Malformed identities,
+    non-iterable entry lists and invalid vectors are dropped. Vectors are
+    not normalised here; the recogniser normalises both sides.
+    """
+
+    cleaned: dict[str, list[np.ndarray]] = {}
+
+    rejected = 0
+
+    if not isinstance(data, dict):
+
+        return cleaned, 1
+
+    for name, embeddings in data.items():
+
+        if not isinstance(name, str) or not name.strip():
+
+            rejected += 1
+
+            continue
+
+        if isinstance(embeddings, np.ndarray):
+
+            embeddings = [embeddings]
+
+        try:
+
+            candidates = list(embeddings)
+
+        except TypeError:
+
+            rejected += 1
+
+            continue
+
+        valid: list[np.ndarray] = []
+
+        for embedding in candidates:
+
+            try:
+
+                valid.append(
+                    normalize_embedding(
+                        embedding,
+                        normalize=False,
+                    )
+                )
+
+            except ValueError:
+
+                rejected += 1
+
+        if valid:
+
+            cleaned[name] = valid
+
+    return cleaned, rejected
 
 
 class FaceDatabase:
@@ -25,48 +97,49 @@ class FaceDatabase:
         self,
         embedding_model: EmbeddingModel,
         database_path: str = "models/faces",
+        cache: FaceCache | None = None,
     ) -> None:
 
         self.embedding_model = embedding_model
 
-        self.database_path = Path(database_path)
+        database_path = Path(database_path)
 
-        self.cache = FaceCache()
+        if not database_path.is_absolute():
+
+            database_path = PROJECT_ROOT / database_path
+
+        self.database_path = database_path
+
+        self.cache = cache if cache is not None else FaceCache()
 
         self._database: dict[str, list[np.ndarray]] = {}
 
     def load(self) -> None:
         """
-        Load the database.
+        Load the database, preferring a valid cache.
         """
 
-        # -----------------------------
-        # Load from cache if available
-        # -----------------------------
-        if self.cache.exists():
-
-            print("[FaceDatabase] Loading cache...")
-
-            self._database = self.cache.load()
-
-            print("[FaceDatabase] Cache loaded successfully.")
+        if self._load_cache():
 
             return
 
         # -----------------------------
-        # Otherwise generate embeddings
+        # Generate embeddings from images
         # -----------------------------
         print("[FaceDatabase] Generating embeddings...")
 
         self._database.clear()
 
         if not self.database_path.exists():
+
             print("[FaceDatabase] Face folder not found.")
+
             return
 
         for person_folder in sorted(self.database_path.iterdir()):
 
             if not person_folder.is_dir():
+
                 continue
 
             person_name = person_folder.name
@@ -86,12 +159,30 @@ class FaceDatabase:
                 image = cv2.imread(str(image_path))
 
                 if image is None:
+
+                    print(f"  Could not read {image_path.name}")
+
                     continue
 
                 embedding = self.embedding_model.generate(image)
 
                 if embedding is None:
-                    print(f"  No face found in {image_path.name}")
+
+                    print(f"  No usable face found in {image_path.name}")
+
+                    continue
+
+                try:
+
+                    embedding = normalize_embedding(
+                        embedding,
+                        normalize=False,
+                    )
+
+                except ValueError:
+
+                    print(f"  Invalid embedding in {image_path.name}")
+
                     continue
 
                 embeddings.append(embedding)
@@ -99,14 +190,14 @@ class FaceDatabase:
                 print(f"  Loaded {image_path.name}")
 
             if embeddings:
+
                 self._database[person_name] = embeddings
 
-        # -----------------------------
-        # Save cache
-        # -----------------------------
-        self.cache.save(self._database)
+        if self._database:
 
-        print("[FaceDatabase] Cache saved.")
+            self.cache.save(self._database)
+
+            print("[FaceDatabase] Cache saved.")
 
         print(
             f"[FaceDatabase] Loaded {self.person_count()} people."
@@ -115,6 +206,63 @@ class FaceDatabase:
         print(
             f"[FaceDatabase] Total embeddings: {self.embedding_count()}"
         )
+
+    def _load_cache(self) -> bool:
+        """Load and sanitise the cache. Returns True when usable."""
+
+        if not self.cache.exists():
+
+            return False
+
+        print("[FaceDatabase] Loading cache...")
+
+        try:
+
+            cached = self.cache.load()
+
+        except Exception as error:
+
+            print(
+                "[FaceDatabase] Cache could not be read (%s); "
+                "rebuilding from face images." % error
+            )
+
+            return False
+
+        cleaned, rejected = sanitize_embeddings(cached)
+
+        if not cleaned:
+
+            print(
+                "[FaceDatabase] Cache contains no usable embeddings; "
+                "rebuilding from face images."
+            )
+
+            return False
+
+        self._database = cleaned
+
+        if rejected:
+
+            print(
+                "[FaceDatabase] Ignored %d invalid cached embedding(s)."
+                % rejected
+            )
+
+            # The cache is derived data; keep it clean for the next run.
+            self.cache.save(cleaned)
+
+        print("[FaceDatabase] Cache loaded successfully.")
+
+        print(
+            f"[FaceDatabase] Loaded {self.person_count()} people."
+        )
+
+        print(
+            f"[FaceDatabase] Total embeddings: {self.embedding_count()}"
+        )
+
+        return True
 
     def get_database(self) -> dict[str, list[np.ndarray]]:
         return self._database

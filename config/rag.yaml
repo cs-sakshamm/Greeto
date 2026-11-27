@@ -1,0 +1,70 @@
+# Retrieval-augmented generation settings.
+#
+# The kiosk must work offline, with no vector database server. The index is
+# an embedded float32 matrix stored under data/vector_index/ (gitignored),
+# loaded at startup and scanned with an exact cosine match. A few hundred
+# chunks stay well inside the 15-25 ms retrieval budget on a Jetson CPU.
+rag:
+  enabled: true
+
+  # Primary corpus. The older app/knowledge notes are only used when the
+  # primary directory is absent, so a deployment can swap either way.
+  sources:
+    - knowledge_base
+  fallback_sources:
+    - app/knowledge
+
+  index_dir: data/vector_index
+
+  # Build the index on first start (or when the corpus changes). Set to
+  # false on a read-only kiosk image; a missing index then falls back to
+  # lexical-only retrieval instead of failing startup.
+  auto_build: true
+
+  embedding:
+    # auto: use sentence-transformers when installed, otherwise the
+    #       dependency-free hashed n-gram embedder.
+    # sentence-transformers: require bge-small (raises if missing).
+    # hashing: always use the local fallback (no model download).
+    backend: auto
+    model: BAAI/bge-small-en-v1.5
+    hashing_dim: 384
+
+  retrieval:
+    # Chunks included in the prompt. Three focused chunks fit comfortably
+    # inside prompt.max_context_chars (1100) and keep prompt evaluation fast.
+    top_k: 3
+    dense_top_k: 8
+
+    # Reciprocal Rank Fusion constant and per-retriever weights. The lexical
+    # scorer is kept at full weight because exact identifiers (helpline,
+    # IFSC, fee amounts) are the highest-risk hallucination surface.
+    rrf_k: 60
+    lexical_weight: 1.0
+    dense_weight: 1.0
+
+    # Dense hits below this cosine similarity are ignored, so unrelated
+    # chunks cannot outvote a clean lexical match.
+    min_dense_similarity: 0.05
+
+    max_chunk_chars: 500
+    max_context_chars: 1100
+
+    # Confidence gate: when no chunk has meaningful overlap and the query
+    # asks for a fact, ConversationManager answers with the helpline rather
+    # than letting a 0.5B model improvise. General chat still uses the LLM.
+    confidence_gate: true
+    min_confidence: 0.30
+
+    # If the lexical scorer has a very strong exact match, promote that
+    # chunk ahead of a generic long overview that the dense ranker prefers.
+    # This is what keeps "documents required for admission" anchored to the
+    # atomic document-checklist Q&A instead of a recruitment blurb.
+    lexical_anchor: true
+    lexical_anchor_min_score: 120.0
+
+    # If the LLM still refuses while a confident atomic Q&A answer is in
+    # context, ConversationManager answers from that chunk verbatim instead
+    # of handing off to the helpline. This preserves the "no unprompted
+    # handoff when factual knowledge exists" invariant.
+    answer_confidence_floor: 0.55

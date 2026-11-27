@@ -1,0 +1,33 @@
+# Greeto - Windows runtime dependencies
+#
+# Captured from the validated Windows virtual environment
+# (Python 3.11.1, .venv) on the development machine.
+#
+# Install with:
+#     python -m pip install -r requirements_windows.txt
+#
+# This file is UTF-8. The previous version was produced with
+# `pip freeze > requirements_windows.txt` inside PowerShell, which
+# wrote UTF-16 and made the file unreadable to pip.
+
+# GUI (PyQt5 replaces PySide6 - Jetson/Python 3.8 does not have PySide6)
+PyQt5==5.15.11
+
+# Vision
+opencv-contrib-python==4.11.0.86
+numpy==2.4.6
+insightface==1.0.1
+onnx==1.22.0
+onnxruntime-gpu==1.28.0
+
+# Speech
+pywhispercpp==1.5.0
+piper-tts==1.6.0
+webrtcvad==2.0.10
+sounddevice==0.5.5
+
+# Brain
+llama_cpp_python==0.3.34
+
+# Configuration
+PyYAML==6.0.3

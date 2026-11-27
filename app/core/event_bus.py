@@ -5,9 +5,15 @@ This module allows different parts of the application to communicate
 without directly depending on each other.
 """
 
+from __future__ import annotations
+
+import logging
 from collections import defaultdict
 from threading import Lock
 from typing import Any, Callable
+
+
+logger = logging.getLogger(__name__)
 
 
 class EventBus:
@@ -80,8 +86,23 @@ class EventBus:
             callbacks = list(self._subscribers.get(event_name, []))
 
         # Execute callbacks outside the lock.
+        #
+        # A failing subscriber must never abort the remaining
+        # subscribers or kill the background thread that
+        # published the event.
         for callback in callbacks:
-            callback(**kwargs)
+
+            try:
+
+                callback(**kwargs)
+
+            except Exception:
+
+                logger.exception(
+                    "Event callback failed for event '%s': %s",
+                    event_name,
+                    callback,
+                )
 
     def clear(self) -> None:
         """

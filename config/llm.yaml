@@ -1,1 +1,57 @@
-ui
+# Local LLM settings (llama-cpp-python).
+#
+# Active default: Qwen2.5-0.5B-Instruct Q4_K_M. It is a ~0.5B Qwen model
+# with no thinking phase, which keeps first-token latency low on both the
+# Windows development machine and the Jetson Xavier NX.
+#
+# A Qwen3-0.6B GGUF can be used instead by pointing model.path at it and
+# setting generation.enable_thinking to false (the loader appends the
+# Qwen3 /no_think switch automatically). Gemma-3-1B remains available as
+# a fallback for A/B comparison only.
+model:
+  path: models/llm/qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+  # Tried in order when model.path does not exist. The first existing
+  # file wins; a warning is logged so a silent model switch is visible.
+  fallback_paths:
+    - models/llm/Qwen3-0.6B-Q4_K_M.gguf
+    - models/llm/qwen3-0.6b-q4_k_m.gguf
+    - models/llm/gemma-3-1b-it-Q4_K_M.gguf
+
+  # Context is deliberately small: prompts are compact admission answers,
+  # and a smaller KV cache loads faster and leaves more memory for vision.
+  n_ctx: 1024
+  n_batch: 256
+  n_threads: 6
+  # -1 offloads every layer when the build has a GPU backend; llama.cpp
+  # falls back to CPU on its own on the Jetson/Windows CPU builds.
+  n_gpu_layers: -1
+
+generation:
+  # Short spoken kiosk answers: 1-3 sentences. Keeping this tight bounds
+  # the worst-case generation time after the first token.
+  max_tokens: 96
+  temperature: 0.2
+  top_p: 0.8
+  repeat_penalty: 1.05
+
+  # Qwen3 models emit reasoning tokens unless disabled. Qwen2.5 has no
+  # thinking phase, so this is a no-op there.
+  enable_thinking: false
+
+prompt:
+  # Hard caps keep prompt evaluation (and therefore first-token latency)
+  # predictable for a 0.5B model. The static system rules stay at the top
+  # of the ChatML prompt so llama.cpp can reuse the KV-cache prefix across
+  # turns; retrieved context and the question live in the user turn.
+  max_context_chars: 1100
+  max_history_messages: 4
+
+streaming:
+  # Decode the JSON "reply" field as tokens arrive and hand completed
+  # sentences to the warm Piper voice while generation continues.
+  sentence_tts: true
+  min_sentence_chars: 8
+  # A model that never emits punctuation is cut at a word boundary rather
+  # than waiting for the whole answer.
+  max_sentence_chars: 240
