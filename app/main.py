@@ -119,7 +119,7 @@ def main() -> int:
 
         # ConversationManager registers itself with the
         # EventBus during initialization.
-        ConversationManager(container, tts_service=tts)
+        ConversationManager(container, tts_service=tts, vision_service=vision)
 
         # ---------------------------------------------
         # Start Backend Services

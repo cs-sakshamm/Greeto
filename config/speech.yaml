@@ -8,6 +8,12 @@ audio:
   min_recording_seconds: 0.3
   queue_max_chunks: 100
   auto_resample: true
+  # Fixed microphone gain applied to recorded speech (barge-in gate and
+  # Whisper buffer). A visitor speaking ~1 m from the kiosk mic measured
+  # RMS ~0.0043, which sat below the elevated playback gate and was
+  # transcribed poorly. 2.0x lifts it without touching the onset VAD,
+  # whose energy_threshold is calibrated on the raw signal.
+  input_gain: 2.0
 
 vad:
   # Aggressiveness: 0=least sensitive, 3=most sensitive to speech
@@ -28,12 +34,27 @@ vad:
   pre_speech_ms: 384
 
 stt:
+  # Speed vs accuracy switch for short questions. `model` maps to
+  # models/whisper/ggml-<model>.en.bin and is used when that file exists:
+  # tiny | base | small | medium. Set to null to use model_path exactly.
+  model: null
   model_path: models/whisper/ggml-tiny.en.bin
   language: en
   n_threads: 4
-  initial_prompt: "Hello, hi, greetings, I.T.S Engineering College, Greater Noida, APJ Abdul Kalam Technical University, AKTU, B.Tech, CSE, Computer Science, ECE, Electronics, ME, Mechanical, Civil, MBA, MCA, admission, fees, eligibility, hostel, placement, registrar, scholarship, campus, Greeto."
+  # Domain bias for Whisper. Kiosk questions are short and acoustically
+  # similar ("who are you" / "who love you"), so the prompt names the
+  # college, the spoken intent phrases and the admission vocabulary.
+  initial_prompt: "Hello, hi, greetings, Greeto, I.T.S Engineering College, Greater Noida, APJ Abdul Kalam Technical University, AKTU, B.Tech, CSE, Computer Science, ECE, Electronics, ME, Mechanical, Civil, MBA, MCA, admission, fees, eligibility, hostel, placement, registrar, scholarship, campus. Who are you? Do you recognize me? Who am I? Can you see me? What is the fee? Tell me about hostel and placements."
+  # Appended to initial_prompt (pywhispercpp has no separate hotword API).
+  hotwords: "Greeto, ITSEC, I.T.S, B.Tech, MBA, fees, hostel, placements, admissions"
   max_text_length: 500
   min_text_length: 3
+  # Quiet utterances (RMS ~0.004) are peak-normalised before Whisper so
+  # short questions are not clipped or heard as noise. Gain is capped and
+  # skipped for an effectively silent buffer.
+  normalize_audio: true
+  normalize_target_peak: 0.9
+  normalize_max_gain: 64.0
 
 tts:
   # auto tries the in-process Piper voice first (voice model loaded once)
@@ -42,6 +63,24 @@ tts:
   engine: auto
   # Piper speaking-rate multiplier: <1.0 is faster, >1.0 is slower.
   length_scale: 1.0
+
+barge_in:
+  # Allow a visitor to interrupt Greeto while it is thinking or speaking.
+  enabled: true
+  # A barge-in only fires while a face is present in the camera frame.
+  # Disable only for a voice-only deployment without a camera.
+  require_visitor_in_frame: true
+  # Sustained speech needed before the interruption is accepted.
+  min_speech_ms: 200
+  # The VAD energy gate is raised by this factor while Piper is playing,
+  # so Greeto's own speaker output cannot trigger self-interruption.
+  # This is applied after audio.input_gain.
+  playback_vad_threshold_multiplier: 1.8
+  # Optional absolute RMS gate (after input gain) for a calibrated mic.
+  # Leave null to derive the gate from the VAD energy threshold above.
+  energy_threshold: null
+  # Ignore a second barge-in immediately after an accepted one.
+  cooldown_ms: 300
 
 pipeline:
   publish_events: true

@@ -36,6 +36,7 @@ from app.brain.prompt_manager import PromptManager
 from app.brain.parser import ResponseParser, LLMResponse
 from app.brain.knowledge_base import KnowledgeBase
 from app.brain.streaming import ReplyStreamExtractor, SentenceChunker
+from app.speech.transcript_normalizer import normalize_transcript
 
 
 def _ms(seconds: float | None) -> str:
@@ -67,6 +68,7 @@ class _SentenceSpeaker:
             name="SentenceSpeaker-%s" % turn_id,
         )
         self._closed = False
+        self._cancelled = False
 
     def start(self) -> None:
         self._thread.start()
@@ -83,11 +85,38 @@ class _SentenceSpeaker:
         self._queue.put(None)
         self._thread.join()
 
+    def cancel(self) -> None:
+        """Flush queued sentences and stop speaking the interrupted turn."""
+
+        self._cancelled = True
+
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
+
+        self._queue.put(None)
+
+    def wait_stopped(self, timeout: float = 0.5) -> bool:
+        """Wait briefly for the speaker thread to leave ``speak``."""
+
+        if self._thread.is_alive():
+            self._thread.join(timeout=timeout)
+
+        return not self._thread.is_alive()
+
     def _run(self) -> None:
         while True:
             text = self._queue.get()
 
-            if text is None:
+            if text is None or self._cancelled:
+                return
+
+            # A cancel() can land between the queue read and this call;
+            # the turn fence is re-checked as late as possible so an
+            # interrupted turn never starts a fresh utterance.
+            if self._cancelled:
                 return
 
             try:
@@ -96,11 +125,14 @@ class _SentenceSpeaker:
                 except TypeError:
                     played = self.tts.speak(text)
 
-                if played:
+                if played and not self._cancelled:
                     self.spoken_any = True
 
             except Exception:  # noqa: BLE001 - one sentence must not kill TTS
                 continue
+
+            if self._cancelled:
+                return
 
 
 class ConversationManager:
@@ -149,6 +181,54 @@ class ConversationManager:
         "contact", "phone", "helpline", "address", "course", "branch",
         "percentage", "lpa", "deadline", "date", "counseling", "aktu",
         "uptac", "jee", "cat", "mat", "syllabus", "attendance",
+    )
+
+    # Extra cues that only make a question college-related. Used by the
+    # two-lane router: these keep strict KB grounding, while a question
+    # with none of these cues and no strong retrieval may be answered as
+    # general conversation.
+    _COLLEGE_CUES = _FACTUAL_CUES + (
+        "college", "campus", "university", "greeto", "its engineering",
+        "noida", "registrar", "director", "chairman", "faculty", "library",
+        "lab", "transport", "semester", "exam", "credit", "accredit",
+        "naac", "nba", "nirf", "programme", "program", "ranking", "group",
+    )
+
+    # Deterministic persona answer. "Who are you?" is not a college fact,
+    # so it must never reach the retrieved-KB refusal path.
+    PERSONA_REPLY = (
+        "I am Greeto, the AI admission receptionist for I.T.S Engineering "
+        "College, Greater Noida. I can help you with admissions, courses, "
+        "fees and campus information."
+    )
+
+    _PERSONA_PATTERNS = (
+        re.compile(r"\bwho\s+are\s+you\b", re.IGNORECASE),
+        re.compile(r"\bwhat\s+are\s+you\b", re.IGNORECASE),
+        re.compile(r"\bwhat(?:'s| is)\s+your\s+name\b", re.IGNORECASE),
+        re.compile(r"\bintroduce\s+yourself\b", re.IGNORECASE),
+        re.compile(r"\btell\s+me\s+about\s+yourself\b", re.IGNORECASE),
+        re.compile(
+            r"\bare\s+you\s+(?:a\s+)?(?:robot|human|real|ai|bot)\b",
+            re.IGNORECASE,
+        ),
+    )
+
+    # Live-identity questions are answered from the camera state, never
+    # from the college knowledge base.
+    _IDENTITY_PATTERNS = (
+        re.compile(
+            r"\bdo\s+you\s+(?:recognize|recognise|know|remember)\s+me\b",
+            re.IGNORECASE,
+        ),
+        re.compile(r"\bwho\s+am\s+i\b", re.IGNORECASE),
+        re.compile(r"\bcan\s+you\s+see\s+me\b", re.IGNORECASE),
+        re.compile(r"\bdo\s+you\s+see\s+me\b", re.IGNORECASE),
+        re.compile(r"\bwhat(?:'s| is)\s+my\s+name\b", re.IGNORECASE),
+        re.compile(
+            r"\bam\s+i\s+(?:visible|in\s+(?:the\s+)?frame)\b",
+            re.IGNORECASE,
+        ),
     )
 
     @staticmethod
@@ -250,6 +330,7 @@ class ConversationManager:
         container: ServiceContainer,
         tts_service,
         llm=None,
+        vision_service=None,
     ) -> None:
 
         self.container = container
@@ -301,6 +382,15 @@ class ConversationManager:
             # Test doubles may accept no constructor arguments.
             self.knowledge = KnowledgeBase()
 
+        # Prime the embedder/index while Piper TTS is also warming up, so
+        # the first live visitor query never pays a cold model-load penalty.
+        if hasattr(self.knowledge, "warm_up"):
+            threading.Thread(
+                target=self._warm_up_knowledge,
+                daemon=True,
+                name="KnowledgeWarmup",
+            ).start()
+
         rag = getattr(self.knowledge, "rag", {}) or {}
         retrieval = rag.get("retrieval", {}) if isinstance(rag, dict) else {}
         self.extractive_floor = float(
@@ -308,6 +398,20 @@ class ConversationManager:
         )
 
         self.tts = tts_service
+
+        # Live camera identity, used to answer "Do you recognize me?" /
+        # "Who am I?" from what the camera actually sees. A real
+        # VisionService is queried directly; the visitor events kept below
+        # are the fallback so an injected/event-only deployment (and the
+        # tests) behave the same way.
+        self.vision_service = vision_service
+        self._vision_lock = threading.Lock()
+        self._vision_state = {
+            "present": False,
+            "recognized": False,
+            "name": None,
+            "sitting_id": None,
+        }
 
         self.history = []
 
@@ -321,6 +425,12 @@ class ConversationManager:
         # turn_id -> monotonic stage timestamps used by the latency log.
         self._timings: dict[int, dict] = {}
 
+        # Barge-in: per-turn cancellation flags and the currently speaking
+        # sentence worker. Both are touched from the event-bus/VAD thread.
+        self._cancel_events: dict[int, threading.Event] = {}
+        self._active_speaker = None
+        self._active_speaker_turn = None
+
         self.register_events()
 
         self.logger.info(
@@ -329,6 +439,15 @@ class ConversationManager:
         )
 
     # -------------------------------------------------
+
+    def _warm_up_knowledge(self):
+        try:
+            elapsed = self.knowledge.warm_up()
+            self.logger.info(
+                "LATENCY kb_warmup_ms=%.1f", float(elapsed or 0.0)
+            )
+        except Exception as error:  # noqa: BLE001 - warm-up is optional
+            self.logger.debug("Knowledge base warm-up skipped: %s", error)
 
     def register_events(
         self,
@@ -346,6 +465,22 @@ class ConversationManager:
         self.event_bus.subscribe(
             "speech.speaking_started",
             self._on_playback_started,
+        )
+        self.event_bus.subscribe(
+            "speech.barge_in",
+            self._on_barge_in,
+        )
+        self.event_bus.subscribe(
+            "visitor.detected",
+            self._on_vision_visitor,
+        )
+        self.event_bus.subscribe(
+            "visitor.unknown",
+            self._on_vision_visitor,
+        )
+        self.event_bus.subscribe(
+            "visitor.left",
+            self._on_vision_left,
         )
 
     # -------------------------------------------------
@@ -391,6 +526,112 @@ class ConversationManager:
 
         return any(cue in lowered for cue in cls._FACTUAL_CUES)
 
+    @classmethod
+    def _is_college_related(
+        cls,
+        text: str,
+        confidence: float | None,
+        has_evidence: bool,
+    ) -> bool:
+        """Return True when the strict college lane owns this question.
+
+        A question is institutional when it uses admission/campus
+        vocabulary or when retrieval is confident enough that the answer
+        really came from the college corpus. Everything else (general
+        knowledge, small talk) may be answered conversationally.
+        """
+
+        lowered = (text or "").casefold()
+
+        if any(cue in lowered for cue in cls._COLLEGE_CUES):
+            return True
+
+        try:
+            if has_evidence and confidence is not None and float(confidence) >= 0.55:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+        return False
+
+    @classmethod
+    def _is_identity_query(cls, text: str) -> bool:
+        return any(pattern.search(text or "") for pattern in cls._IDENTITY_PATTERNS)
+
+    @classmethod
+    def _is_persona_query(cls, text: str) -> bool:
+        return any(pattern.search(text or "") for pattern in cls._PERSONA_PATTERNS)
+
+    # -------------------------------------------------
+    # Live identity
+    # -------------------------------------------------
+
+    def _on_vision_visitor(self, name=None, sitting_id=None, **kwargs) -> None:
+        """Track the last vision identity so the event-only path works."""
+
+        recognized = self._is_valid_known_name(name)
+
+        with self._vision_lock:
+            self._vision_state = {
+                "present": True,
+                "recognized": recognized,
+                "name": name.strip() if recognized and isinstance(name, str) else None,
+                "sitting_id": sitting_id,
+            }
+
+    def _on_vision_left(self, **kwargs) -> None:
+        with self._vision_lock:
+            self._vision_state = {
+                "present": False,
+                "recognized": False,
+                "name": None,
+                "sitting_id": None,
+            }
+
+    def _live_identity(self) -> dict:
+        """Return the current camera identity snapshot."""
+
+        service = self.vision_service
+
+        if service is not None and hasattr(service, "current_identity"):
+            try:
+                snapshot = service.current_identity()
+                if isinstance(snapshot, dict):
+                    return snapshot
+            except Exception as error:  # noqa: BLE001 - vision is optional
+                self.logger.debug("Vision identity lookup failed: %s", error)
+
+        with self._vision_lock:
+            return dict(self._vision_state)
+
+    def _identity_answer(self, text: str) -> str | None:
+        """Answer a live-identity question from the camera, not the KB."""
+
+        if not self._is_identity_query(text):
+            return None
+
+        identity = self._live_identity()
+        name = identity.get("name")
+
+        if identity.get("recognized") and self._is_valid_known_name(name):
+            return "Yes, I see you, %s." % name.strip()
+
+        if identity.get("present"):
+            return (
+                "I can see someone in front of me, but no enrolled face "
+                "match is active right now."
+            )
+
+        return "I don't see anyone in front of the camera right now."
+
+    def _persona_answer(self, text: str) -> str | None:
+        """Answer "Who are you?" deterministically, in persona."""
+
+        if not self._is_persona_query(text):
+            return None
+
+        return self.PERSONA_REPLY
+
     def _speak_text(self, text: str, turn_id: int):
         """Call TTS across both the current and legacy test-double API."""
 
@@ -420,10 +661,96 @@ class ConversationManager:
 
         return context or "", None, bool(context)
 
-    def _stream_sentence(self, sentence: str, context: str) -> str:
-        """Ground and format one streamed sentence before it is spoken."""
+    def _store_timings(
+        self,
+        turn_id: int,
+        t_speech_end: float,
+        t_stt_done: float,
+        kb_done: float,
+    ) -> None:
+        """Record the latency trace for one turn and bound its size."""
 
-        grounded = self._ground_reply(sentence, context)
+        self._timings[turn_id] = {
+            "speech_end": t_speech_end,
+            "stt_done": t_stt_done,
+            "kb_done": kb_done,
+            "llm_first_token": None,
+            "llm_done": None,
+            "playback_logged": False,
+        }
+
+        if len(self._timings) > self.MAX_TIMING_ENTRIES:
+
+            for stale in list(self._timings)[:-self.MAX_TIMING_ENTRIES]:
+
+                self._timings.pop(stale, None)
+
+    def _answer_prebuilt(
+        self,
+        turn_id: int,
+        answer: str,
+        t_speech_end: float,
+        t_stt_done: float,
+        reason: str,
+    ) -> None:
+        """Publish and speak a deterministic persona/identity answer."""
+
+        if self._current_turn_id != turn_id:
+
+            self.logger.info(
+                "Turn %s superseded before %s answer. Dropping.",
+                turn_id,
+                reason,
+            )
+
+            return
+
+        now = time.perf_counter()
+        self._store_timings(turn_id, t_speech_end, t_stt_done, now)
+        self._timings[turn_id]["llm_first_token"] = now
+        self._timings[turn_id]["llm_done"] = now
+
+        response = LLMResponse(
+            reply=answer,
+            emotion="happy" if answer.startswith("Yes") or reason == "persona" else "neutral",
+            action="answer",
+        )
+
+        self.logger.info(
+            "LATENCY turn=%s %s answer (%s)",
+            turn_id,
+            reason,
+            _ms(now - t_speech_end),
+        )
+
+        self.history.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "turn_id": turn_id,
+            }
+        )
+
+        self.event_bus.publish(
+            "llm_response_ready",
+            response=response,
+            turn_id=turn_id,
+        )
+
+        if self._current_turn_id == turn_id:
+            self._speak_text(answer, turn_id)
+
+    def _stream_sentence(
+        self, sentence: str, context: str, ground: bool = True
+    ) -> str:
+        """Ground and format one streamed sentence before it is spoken.
+
+        Numeric verification is only applied to college answers. A general
+        conversational answer ("a year has 365 days") has no college
+        context by design and must not be replaced by the helpline.
+        """
+
+        grounded = self._ground_reply(sentence, context) if ground else sentence
 
         if grounded != sentence:
             self.logger.warning(
@@ -568,6 +895,7 @@ class ConversationManager:
         text: str,
         t_speech_end: float | None = None,
         t_stt_done: float | None = None,
+        barge_in: bool = False,
         **kwargs,
     ):
         if not text:
@@ -588,6 +916,16 @@ class ConversationManager:
         if len(text) < 3:
             return
 
+        # Defence in depth: SpeechService already repairs phonetic
+        # mishearings before publishing. Applying the map again here is
+        # idempotent and covers direct/injected transcripts.
+        text, repairs = normalize_transcript(text)
+        if repairs:
+            self.logger.info(
+                "Transcript repaired at conversation layer: %s",
+                "; ".join(repairs),
+            )
+
         now = time.perf_counter()
 
         if t_stt_done is None:
@@ -598,15 +936,19 @@ class ConversationManager:
 
         with self._turn_lock:
             now_wall = time.time()
-            if now_wall - self.last_request < 0.3:
+            # A barge-in utterance is never rate-limited: it is the
+            # visitor's correction and must be answered, not dropped.
+            if not barge_in and now_wall - self.last_request < 0.3:
                 return
 
             self.last_request = now_wall
             self._current_turn_id += 1
             turn_id = self._current_turn_id
 
-        # If previous turn is synthesizing or playing, interrupt it
-        if hasattr(self.tts, "cancel"):
+        # If previous turn is synthesizing or playing, interrupt it.
+        # A barge-in has already been stopped by _on_barge_in, so do not
+        # emit a second tts.stopped event for it.
+        if not barge_in and hasattr(self.tts, "cancel"):
             try:
                 self.tts.cancel()
             except Exception:
@@ -655,6 +997,8 @@ class ConversationManager:
                 t_stt_done = t_start
 
             speaker = None
+            cancel_event = threading.Event()
+            self._cancel_events[turn_id] = cancel_event
 
             try:
                 self.logger.info(
@@ -671,11 +1015,39 @@ class ConversationManager:
                     {
                         "role": "user",
                         "content": text,
+                        "turn_id": turn_id,
                     }
                 )
 
                 if len(self.history) > 6:
                     self.history = self.history[-6:]
+
+                # Deterministic lanes, checked before retrieval. These
+                # questions are about Greeto or the camera, never about
+                # college facts, so they must not hit the KB refusal.
+                identity_answer = self._identity_answer(text)
+
+                if identity_answer:
+                    self._answer_prebuilt(
+                        turn_id,
+                        self._prepare_spoken_answer(identity_answer),
+                        t_speech_end,
+                        t_stt_done,
+                        "live-identity",
+                    )
+                    return
+
+                persona_answer = self._persona_answer(text)
+
+                if persona_answer:
+                    self._answer_prebuilt(
+                        turn_id,
+                        self._prepare_spoken_answer(persona_answer),
+                        t_speech_end,
+                        t_stt_done,
+                        "persona",
+                    )
+                    return
 
                 t_kb_start = time.perf_counter()
 
@@ -683,36 +1055,35 @@ class ConversationManager:
 
                 t_kb_done = time.perf_counter()
 
+                kb_ms = (t_kb_done - t_kb_start) * 1000.0
+
                 self.logger.info(
-                    "Retrieved context length: %d confidence=%s (%.1fms)",
+                    "LATENCY turn=%s kb_ms=%.1f context_chars=%d "
+                    "confidence=%s",
+                    turn_id,
+                    kb_ms,
                     len(context),
                     "n/a" if confidence is None else "%.3f" % confidence,
-                    (t_kb_done - t_kb_start) * 1000.0,
                 )
 
                 if context:
                     self.logger.debug(f"Context preview:\n{context[:500]}")
 
-                self._timings[turn_id] = {
-                    "speech_end": t_speech_end,
-                    "stt_done": t_stt_done,
-                    "kb_done": t_kb_done,
-                    "llm_first_token": None,
-                    "llm_done": None,
-                    "playback_logged": False,
-                }
+                self._store_timings(turn_id, t_speech_end, t_stt_done, t_kb_done)
 
-                if len(self._timings) > self.MAX_TIMING_ENTRIES:
+                # Two-lane routing (Option A): college/admission questions
+                # keep strict KB grounding and the helpline fallback.
+                # General conversation is answered by the LLM.
+                college_related = self._is_college_related(
+                    text, confidence, has_evidence
+                )
 
-                    for stale in list(self._timings)[:-self.MAX_TIMING_ENTRIES]:
-
-                        self._timings.pop(stale, None)
-
-                # Confidence gate: a factual question with no retrieved
-                # evidence must not be handed to a 0.5B model to improvise.
-                # General conversation still goes through the LLM.
+                # Confidence gate: a factual college question with no
+                # retrieved evidence must not be handed to a 0.5B model to
+                # improvise. General conversation still goes through the LLM.
                 if (
-                    confidence is not None
+                    college_related
+                    and confidence is not None
                     and not has_evidence
                     and self._looks_factual(text)
                     and getattr(self.knowledge, "confidence_gate", True)
@@ -737,7 +1108,11 @@ class ConversationManager:
                     )
 
                     self.history.append(
-                        {"role": "assistant", "content": answer}
+                        {
+                            "role": "assistant",
+                            "content": answer,
+                            "turn_id": turn_id,
+                        }
                     )
 
                     self.event_bus.publish(
@@ -781,9 +1156,25 @@ class ConversationManager:
 
                 if self.stream_sentences:
                     speaker = _SentenceSpeaker(self.tts, turn_id)
+                    self._active_speaker = speaker
+                    self._active_speaker_turn = turn_id
                     speaker.start()
 
-                for token in self.llm.stream_generate(prompt):
+                try:
+                    token_stream = self.llm.stream_generate(
+                        prompt, cancel_event=cancel_event
+                    )
+                except TypeError:
+                    # Test doubles / older local wrappers accept only the
+                    # prompt. The token-loop guard below still cancels them.
+                    token_stream = self.llm.stream_generate(prompt)
+
+                for token in token_stream:
+                    if cancel_event.is_set():
+                        self.logger.info(
+                            f"Turn {turn_id} cancelled by barge-in during LLM generation."
+                        )
+                        return
                     if self._current_turn_id != turn_id:
 
                         self.logger.info(
@@ -800,7 +1191,9 @@ class ConversationManager:
 
                         if decoded:
                             for sentence in chunker.feed(decoded):
-                                spoken = self._stream_sentence(sentence, context)
+                                spoken = self._stream_sentence(
+                                    sentence, context, ground=college_related
+                                )
 
                                 # Do not speak a refusal while confident
                                 # evidence exists; the extractive answer is
@@ -832,7 +1225,11 @@ class ConversationManager:
                     tail = chunker.flush()
 
                     if tail:
-                        speaker.submit(self._stream_sentence(tail, context))
+                        speaker.submit(
+                            self._stream_sentence(
+                                tail, context, ground=college_related
+                            )
+                        )
                         submitted_sentences += 1
 
                 self.logger.info(
@@ -867,17 +1264,19 @@ class ConversationManager:
 
                 answer = response.reply.strip()
 
-                grounded = self._ground_reply(answer, context)
+                if college_related:
 
-                if grounded != answer:
+                    grounded = self._ground_reply(answer, context)
 
-                    self.logger.warning(
-                        "Ungrounded numeric claim rejected [Turn %s]: %r",
-                        turn_id,
-                        answer[:200],
-                    )
+                    if grounded != answer:
 
-                    answer = grounded
+                        self.logger.warning(
+                            "Ungrounded numeric claim rejected [Turn %s]: %r",
+                            turn_id,
+                            answer[:200],
+                        )
+
+                        answer = grounded
 
                 answer = self._prepare_spoken_answer(answer)
 
@@ -904,10 +1303,21 @@ class ConversationManager:
 
                 response.reply = answer
 
+                # A barge-in can land between parsing and this append. Do
+                # not write an interrupted fragment into the next turn's
+                # chat history.
+                if self._current_turn_id != turn_id:
+                    self.logger.info(
+                        f"Turn {turn_id} superseded before history append. "
+                        "Discarding response."
+                    )
+                    return
+
                 self.history.append(
                     {
                         "role": "assistant",
                         "content": answer,
+                        "turn_id": turn_id,
                     }
                 )
 
@@ -947,6 +1357,88 @@ class ConversationManager:
             finally:
                 if speaker is not None:
                     speaker.close()
+                if self._active_speaker is speaker:
+                    self._active_speaker = None
+                    self._active_speaker_turn = None
+                self._cancel_events.pop(turn_id, None)
+
+    # -------------------------------------------------
+
+    def _on_barge_in(self, t_barge_in=None, **kwargs):
+        """Cancel the active turn immediately and stop audio.
+
+        Runs on the SpeechService VAD thread. The turn counter is bumped
+        first, so any token, sentence or queued TTS work from the old turn
+        is already invalid by the time audio is purged.
+        """
+
+        started = time.perf_counter()
+
+        with self._turn_lock:
+            interrupted_turn = self._current_turn_id
+            self._current_turn_id += 1
+
+        cancel_event = self._cancel_events.get(interrupted_turn)
+        if cancel_event is not None:
+            cancel_event.set()
+
+        speaker = self._active_speaker
+        if speaker is not None and self._active_speaker_turn == interrupted_turn:
+            speaker.cancel()
+
+        def stop_audio() -> None:
+            try:
+                if hasattr(self.tts, "stop"):
+                    self.tts.stop()
+                elif hasattr(self.tts, "cancel"):
+                    self.tts.cancel()
+            except Exception as error:  # noqa: BLE001 - interruption must not fail
+                self.logger.warning("TTS stop during barge-in failed: %s", error)
+
+        stop_audio()
+
+        # A sentence worker can be between its cancellation check and its
+        # tts.speak() call. Wait for it to leave speak(), then purge once
+        # more so audio started in that window is also silenced.
+        if speaker is not None and self._active_speaker_turn == interrupted_turn:
+            if not speaker.wait_stopped(timeout=0.5):
+                self.logger.warning(
+                    "Sentence speaker for turn %s still active after cancel; "
+                    "purging audio again.",
+                    interrupted_turn,
+                )
+                stop_audio()
+
+        # Drop the assistant fragment from the interrupted turn so the new
+        # question is answered from a clean history.
+        self.history = [
+            message
+            for message in self.history
+            if not (
+                message.get("role") == "assistant"
+                and message.get("turn_id") == interrupted_turn
+            )
+        ]
+
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        timing = self._timings.setdefault(interrupted_turn, {})
+        timing["barge_in_to_audio_stop_ms"] = elapsed_ms
+
+        self.logger.info(
+            "LATENCY turn=%s barge_in_to_audio_stop_ms=%.1f "
+            "t_barge_in=%s visitor_in_frame=%s",
+            interrupted_turn,
+            elapsed_ms,
+            t_barge_in,
+            kwargs.get("visitor_in_frame"),
+        )
+
+        self.event_bus.publish(
+            "barge_in.handled",
+            turn_id=interrupted_turn,
+            t_barge_in=t_barge_in,
+            audio_stop_ms=elapsed_ms,
+        )
 
     # -------------------------------------------------
 

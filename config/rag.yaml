@@ -22,13 +22,19 @@ rag:
   auto_build: true
 
   embedding:
-    # auto: use sentence-transformers when installed, otherwise the
-    #       dependency-free hashed n-gram embedder.
+    # auto: prefer ONNX bge-small when optimum is installed, then
+    #       sentence-transformers, then the dependency-free hashed n-gram
+    #       embedder.
     # sentence-transformers: require bge-small (raises if missing).
+    # onnx: require ONNX Runtime + bge-small export (raises if missing).
     # hashing: always use the local fallback (no model download).
+    # Set GREETO_EMBED_ONNX=0 to skip the ONNX attempt in auto mode.
     backend: auto
     model: BAAI/bge-small-en-v1.5
     hashing_dim: 384
+
+  # Prime the embedder during startup (alongside the Piper TTS warm-up).
+  warm_up: true
 
   retrieval:
     # Chunks included in the prompt. Three focused chunks fit comfortably

@@ -1,0 +1,507 @@
+{
+  "version": 1,
+  "effective_session": "2026-27",
+  "description": "50-question spoken golden evaluation for Greeto. 35 grounded factual, 5 ambiguous, 10 adversarial.",
+  "queries": [
+    {
+      "id": "F01",
+      "type": "factual",
+      "domain": "KB-02",
+      "query": "whats the campus adress and pin code",
+      "expected_qa_ids": ["KB-02-01"],
+      "required_facts": ["Plot Number 46", "201310"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F02",
+      "type": "factual",
+      "domain": "KB-02",
+      "query": "Who is the Director of the college?",
+      "expected_qa_ids": ["KB-02-07"],
+      "required_facts": ["Mayank Garg"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F03",
+      "type": "factual",
+      "domain": "KB-02",
+      "query": "Who is the Chairman of the I.T.S Education Group?",
+      "expected_qa_ids": ["KB-02-08"],
+      "required_facts": ["R. P. Chadha"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F04",
+      "type": "factual",
+      "domain": "KB-02",
+      "query": "What is the Registrar phone number and email?",
+      "expected_qa_ids": ["KB-02-11"],
+      "required_facts": ["Nitin Gupta", "0120-2331027"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F05",
+      "type": "factual",
+      "domain": "KB-02",
+      "query": "how many permanent faculty 26 phd 10 iitians",
+      "expected_qa_ids": ["KB-02-13"],
+      "required_facts": ["194", "26", "10"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F06",
+      "type": "factual",
+      "domain": "KB-03",
+      "query": "Which B.Tech programs are NBA accredited?",
+      "expected_qa_ids": ["KB-03-03"],
+      "required_facts": ["Electronics and Communication Engineering", "Electrical and Computer Engineering"],
+      "forbidden_facts": ["B.Tech Civil Engineering is NBA accredited"],
+      "answerable": true
+    },
+    {
+      "id": "F07",
+      "type": "factual",
+      "domain": "KB-03",
+      "query": "Which NAAC accreditation cycles does the college hold?",
+      "expected_qa_ids": ["KB-03-04"],
+      "required_facts": ["2015–2020", "2024–2029"],
+      "forbidden_facts": ["B++"],
+      "answerable": true
+    },
+    {
+      "id": "F08",
+      "type": "factual",
+      "domain": "KB-03",
+      "query": "What is the NIRF Innovation band and ARIIA ranking?",
+      "expected_qa_ids": ["KB-03-06"],
+      "required_facts": ["151–300", "Band A"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F09",
+      "type": "factual",
+      "domain": "KB-04",
+      "query": "Is the sanctioned intake 750 for CSE, 180 for AI ML, 120 for Data Science, 60 for ECE and 60 for MBA?",
+      "expected_qa_ids": ["KB-04-03"],
+      "required_facts": ["750", "180", "120", "60", "30"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F10",
+      "type": "factual",
+      "domain": "KB-04",
+      "query": "What YGPA do I need for a B.Tech Honours degree?",
+      "expected_qa_ids": ["KB-04-08"],
+      "required_facts": ["7.5 YGPA"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F11",
+      "type": "factual",
+      "domain": "KB-04",
+      "query": "How many credits are needed for a Minor degree and is there a penalty?",
+      "expected_qa_ids": ["KB-04-10"],
+      "required_facts": ["18 to 20 credits", "no penalty"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F12",
+      "type": "factual",
+      "domain": "KB-05",
+      "query": "How many mandatory skill hours do B.Tech and CSE students complete?",
+      "expected_qa_ids": ["KB-05-08"],
+      "required_facts": ["310", "210"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F13",
+      "type": "factual",
+      "domain": "KB-06",
+      "query": "What Class 12 PCM percentage is needed for B.Tech admission?",
+      "expected_qa_ids": ["KB-06-02"],
+      "required_facts": ["45 percent", "40 percent"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F14",
+      "type": "factual",
+      "domain": "KB-06",
+      "query": "What are the MBA eligibility marks and accepted entrance exams?",
+      "expected_qa_ids": ["KB-06-05"],
+      "required_facts": ["50 percent", "45 percent", "CAT", "MAT", "CMAT", "XAT", "CUET-PG"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F15",
+      "type": "factual",
+      "domain": "KB-07",
+      "query": "What documents are required for B.Tech admission?",
+      "expected_qa_ids": ["KB-07-01"],
+      "required_facts": ["Class 10", "Migration", "Transfer Certificate", "Aadhaar", "Medical Fitness"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F16",
+      "type": "factual",
+      "domain": "KB-08",
+      "query": "What is the total MBA fee and how many installments?",
+      "expected_qa_ids": ["KB-08-01"],
+      "required_facts": ["2,56,500", "four installments"],
+      "forbidden_facts": ["1,20,000"],
+      "answerable": true
+    },
+    {
+      "id": "F17",
+      "type": "factual",
+      "domain": "KB-08",
+      "query": "Is there a 20000 branch discount for core B.Tech branches?",
+      "expected_qa_ids": ["KB-08-03"],
+      "required_facts": ["20,000", "Civil Engineering", "Mechanical Engineering"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F18",
+      "type": "factual",
+      "domain": "KB-08",
+      "query": "What are the AKTU pre enrollment and examination fees?",
+      "expected_qa_ids": ["KB-08-04"],
+      "required_facts": ["2,306", "7,500"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F19",
+      "type": "factual",
+      "domain": "KB-08",
+      "query": "What is the Canara Bank account number and IFSC code?",
+      "expected_qa_ids": ["KB-08-05"],
+      "required_facts": ["85563060000038", "CNRB0018556"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F20",
+      "type": "factual",
+      "domain": "KB-08",
+      "query": "How much is deducted if I cancel admission before classes start?",
+      "expected_qa_ids": ["KB-08-06"],
+      "required_facts": ["1,000"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F21",
+      "type": "factual",
+      "domain": "KB-08",
+      "query": "How long does the APERP refund process take?",
+      "expected_qa_ids": ["KB-08-10"],
+      "required_facts": ["14 days", "APERP"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F22",
+      "type": "factual",
+      "domain": "KB-09",
+      "query": "What scholarships are available for Defence dependents in B.Tech and MBA?",
+      "expected_qa_ids": ["KB-09-04"],
+      "required_facts": ["30,000", "75,000", "30 percent", "70 percent"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F23",
+      "type": "factual",
+      "domain": "KB-09",
+      "query": "What sports scholarships are offered at zonal, state and national level?",
+      "expected_qa_ids": ["KB-09-05"],
+      "required_facts": ["10,000", "30,000", "10 percent", "20 percent", "30 percent"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F24",
+      "type": "factual",
+      "domain": "KB-09",
+      "query": "Are B.Tech Lateral Entry students eligible for scholarships?",
+      "expected_qa_ids": ["KB-09-07"],
+      "required_facts": ["not eligible"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F25",
+      "type": "factual",
+      "domain": "KB-10",
+      "query": "What are the highest B.Tech and MBA packages and average package?",
+      "expected_qa_ids": ["KB-10-01"],
+      "required_facts": ["49 LPA", "10 LPA", "4.5 LPA"],
+      "forbidden_facts": ["54.74", "18 LPA"],
+      "answerable": true
+    },
+    {
+      "id": "F26",
+      "type": "factual",
+      "domain": "KB-11",
+      "query": "What GPUs are in the Intel Unnati AI Lab?",
+      "expected_qa_ids": ["KB-11-01"],
+      "required_facts": ["Xeon", "dual Nvidia A40 48GB"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F27",
+      "type": "factual",
+      "domain": "KB-11",
+      "query": "Does the college have an Apple M3 iOS lab?",
+      "expected_qa_ids": ["KB-11-02"],
+      "required_facts": ["M3"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F28",
+      "type": "factual",
+      "domain": "KB-12",
+      "query": "How many volumes does the Central Library hold for B.Tech and MBA?",
+      "expected_qa_ids": ["KB-12-03"],
+      "required_facts": ["59,194", "11,889"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F29",
+      "type": "factual",
+      "domain": "KB-12",
+      "query": "Are there separate hostels for boys and girls?",
+      "expected_qa_ids": ["KB-12-04"],
+      "required_facts": ["boys and girls"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F30",
+      "type": "factual",
+      "domain": "KB-12",
+      "query": "Does the college provide bus transport across Noida and Greater Noida?",
+      "expected_qa_ids": ["KB-12-08"],
+      "required_facts": ["transport", "Noida"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F31",
+      "type": "factual",
+      "domain": "KB-13",
+      "query": "attendence requirement for exam",
+      "expected_qa_ids": ["KB-13-01"],
+      "required_facts": ["75 percent"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F32",
+      "type": "factual",
+      "domain": "KB-13",
+      "query": "How many internal exams are held each semester?",
+      "expected_qa_ids": ["KB-13-03"],
+      "required_facts": ["Sessional I", "Sessional II", "Pre-University Test"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F33",
+      "type": "factual",
+      "domain": "KB-13",
+      "query": "What are the passing marks for theory and practical subjects?",
+      "expected_qa_ids": ["KB-13-04"],
+      "required_facts": ["30 percent", "40 percent", "50 percent"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F34",
+      "type": "factual",
+      "domain": "KB-13",
+      "query": "Which anti ragging and grievance committees operate on campus?",
+      "expected_qa_ids": ["KB-13-09"],
+      "required_facts": ["Anti-Ragging Committee", "Internal Complaint Committee"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "F35",
+      "type": "factual",
+      "domain": "KB-12",
+      "query": "What are EHASAS and UDGHOSH?",
+      "expected_qa_ids": ["KB-12-07"],
+      "required_facts": ["EHASAS", "UDGHOSH"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "A01",
+      "type": "ambiguous",
+      "domain": "KB-08",
+      "query": "What is the total fee?",
+      "expected_qa_ids": ["KB-08-01", "KB-08-02"],
+      "required_facts": ["2,56,500"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "A02",
+      "type": "ambiguous",
+      "domain": "KB-06",
+      "query": "What is the eligibility?",
+      "expected_qa_ids": ["KB-06-02", "KB-06-05"],
+      "required_facts": ["45 percent", "50 percent"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "A03",
+      "type": "ambiguous",
+      "domain": "KB-04",
+      "query": "How many seats are there?",
+      "expected_qa_ids": ["KB-04-03"],
+      "required_facts": ["750", "60"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "A04",
+      "type": "ambiguous",
+      "domain": "KB-10",
+      "query": "Tell me about placements.",
+      "expected_qa_ids": ["KB-10-01"],
+      "required_facts": ["49 LPA", "4.5 LPA"],
+      "forbidden_facts": ["54.74", "18 LPA"],
+      "answerable": true
+    },
+    {
+      "id": "A05",
+      "type": "ambiguous",
+      "domain": "KB-07",
+      "query": "What documents do I need?",
+      "expected_qa_ids": ["KB-07-01"],
+      "required_facts": ["Class 10", "Aadhaar"],
+      "forbidden_facts": [],
+      "answerable": true
+    },
+    {
+      "id": "X01",
+      "type": "adversarial",
+      "domain": "KB-08",
+      "query": "Is the B.Tech CSE fee 6.10 lakhs?",
+      "expected_qa_ids": ["KB-08-02"],
+      "required_facts": [],
+      "forbidden_facts": ["6.10", "6,10,000"],
+      "answerable": false
+    },
+    {
+      "id": "X02",
+      "type": "adversarial",
+      "domain": "KB-10",
+      "query": "Did someone get a 54.74 LPA package?",
+      "expected_qa_ids": ["KB-10-01"],
+      "required_facts": [],
+      "forbidden_facts": ["54.74"],
+      "answerable": false
+    },
+    {
+      "id": "X03",
+      "type": "adversarial",
+      "domain": "KB-03",
+      "query": "Is the NAAC grade B++?",
+      "expected_qa_ids": ["KB-03-04"],
+      "required_facts": [],
+      "forbidden_facts": ["B++", "2.6"],
+      "answerable": false
+    },
+    {
+      "id": "X04",
+      "type": "adversarial",
+      "domain": "KB-08",
+      "query": "What is the exact hostel fee this year?",
+      "expected_qa_ids": ["KB-08-02", "KB-08-09"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "X05",
+      "type": "adversarial",
+      "domain": "KB-12",
+      "query": "What are the Greater Noida bus route charges?",
+      "expected_qa_ids": ["KB-12-08"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "X06",
+      "type": "adversarial",
+      "domain": "KB-04",
+      "query": "How many B.Tech CSE seats are vacant right now?",
+      "expected_qa_ids": ["KB-04-04"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "X07",
+      "type": "adversarial",
+      "domain": "KB-06",
+      "query": "What was the closing JEE Main cutoff in the latest UPTAC round?",
+      "expected_qa_ids": ["KB-06-07"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "X08",
+      "type": "adversarial",
+      "domain": "KB-02",
+      "query": "What is the Director salary?",
+      "expected_qa_ids": ["KB-02-07"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "X09",
+      "type": "adversarial",
+      "domain": "KB-04",
+      "query": "Do you offer an MBBS programme?",
+      "expected_qa_ids": ["KB-04-01"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    },
+    {
+      "id": "X10",
+      "type": "adversarial",
+      "domain": "KB-08",
+      "query": "What is the annual B.Tech tuition for the 2027 batch?",
+      "expected_qa_ids": ["KB-08-02"],
+      "required_facts": [],
+      "forbidden_facts": [],
+      "answerable": false
+    }
+  ]
+}

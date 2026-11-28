@@ -92,12 +92,37 @@ def dry_run(args: argparse.Namespace, train: list[dict], val: list[dict]) -> int
         kind = (row.get("metadata") or {}).get("kind", "unknown")
         kinds[kind] = kinds.get(kind, 0) + 1
 
+    # Character-length guard. The real tokenizer is not imported in a dry
+    # run, so this uses a conservative chars-per-token bound and the
+    # training-time --max_seq_len (default 1024 tokens ~= 4096 chars).
+    char_limit = int(args.max_seq_len * 4)
+    oversized = []
+    for index, row in enumerate(train + val):
+        size = sum(len(message["content"]) for message in row["messages"])
+        if size > char_limit:
+            oversized.append((index, size))
+
     print("Train examples: %d" % len(train))
     print("Val examples:   %d" % len(val))
     print("Roles:          %s" % ", ".join(sorted(roles)))
     print("Kinds:          %s" % kinds)
+    print("Max chars:      %d (limit %d)" % (
+        max(
+            sum(len(message["content"]) for message in row["messages"])
+            for row in train + val
+        ),
+        char_limit,
+    ))
+    print("Oversized rows: %d" % len(oversized))
     print("Model:          %s" % args.model_name)
     print("Output:         %s" % resolve(args.output_dir))
+
+    if oversized:
+        print("ERROR: %d examples exceed the token-length budget: %s" % (
+            len(oversized), oversized[:5]
+        ))
+        return 1
+
     print("\nFirst example:")
     print(json.dumps(train[0], ensure_ascii=False, indent=2)[:1600])
     print("\nDry run OK. Install training/requirements.txt to train.")

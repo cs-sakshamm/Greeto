@@ -173,6 +173,19 @@ class VisionService:
         self._visitor_present = False
         self._last_face_time = time.monotonic()
 
+        # Live identity snapshot for the conversation layer. Updated every
+        # recognition cycle from the faces actually in frame, so
+        # "Do you recognize me?" is answered from the camera rather than
+        # from the last visitor event (which may be seconds stale).
+        self._identity_lock = threading.Lock()
+        self._current_identity = {
+            "present": False,
+            "recognized": False,
+            "name": None,
+            "sitting_id": None,
+            "confidence": None,
+        }
+
         self._running = False
 
         # Set when the application is shutting down. It also stops the
@@ -695,17 +708,78 @@ class VisionService:
 
     # -----------------------------------------------------
 
+    def current_identity(self) -> dict:
+        """Return a snapshot of who is currently visible to the camera.
+
+        ``present`` is True for any tracked face, ``recognized`` only when
+        an enrolled identity passes the recognition threshold. The other
+        layers use this to answer identity questions truthfully without
+        consulting the college knowledge base.
+        """
+
+        with self._identity_lock:
+
+            return dict(self._current_identity)
+
+    def _update_current_identity(self, faces: list[Face]) -> None:
+        """Refresh the live identity snapshot from one recognition cycle."""
+
+        best_name = None
+        best_score = None
+
+        for face in faces:
+
+            identity = self._known_identity(face)
+
+            if identity is None:
+
+                continue
+
+            try:
+
+                score = float(face.recognition_score)
+
+            except (TypeError, ValueError):
+
+                score = 0.0
+
+            if best_score is None or score > best_score:
+
+                best_name, best_score = identity, score
+
+        sitting_id = None
+
+        if best_name is not None:
+
+            with self._sitting_lock:
+
+                sitting = self._sittings.get(best_name.casefold())
+
+                sitting_id = sitting.get("id") if sitting else None
+
+        with self._identity_lock:
+
+            self._current_identity = {
+                "present": bool(faces),
+                "recognized": best_name is not None,
+                "name": best_name,
+                "sitting_id": sitting_id,
+                "confidence": best_score,
+            }
+
     def _publish_events(
         self,
         faces: list[Face],
         now: float | None = None,
     ) -> None:
 
+        now = time.monotonic() if now is None else now
+
+        self._update_current_identity(faces)
+
         if self.event_bus is None:
 
             return
-
-        now = time.monotonic() if now is None else now
 
         # ---------------------------------------------------------
         # 1. Session lifecycle for every tracked face

@@ -44,6 +44,12 @@ prompt:
   # predictable for a 0.5B model. The static system rules stay at the top
   # of the ChatML prompt so llama.cpp can reuse the KV-cache prefix across
   # turns; retrieved context and the question live in the user turn.
+  #
+  # Hybrid routing (Option A) lives in PromptManager.SYSTEM_RULES: college
+  # questions are answered only from the retrieved knowledge, while
+  # general conversation is answered normally without inventing college
+  # facts. "Who are you?" is answered deterministically by
+  # ConversationManager before the model is invoked.
   max_context_chars: 1100
   max_history_messages: 4
 

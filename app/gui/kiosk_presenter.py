@@ -30,9 +30,12 @@ Event names used here (the first four already existed):
 
 from __future__ import annotations
 
+import logging
 import time
 
 from PyQt5.QtCore import QObject, Qt, QTimer, pyqtSignal
+
+logger = logging.getLogger(__name__)
 
 
 class KioskPresenter(QObject):
@@ -71,6 +74,8 @@ class KioskPresenter(QObject):
         "conversation.error",
         "speech.sentence_started",
         "speech.sentence_finished",
+        "speech.barge_in",
+        "tts.stopped",
     )
 
     def __init__(
@@ -109,6 +114,16 @@ class KioskPresenter(QObject):
         self._speaking_token = None
 
         self._active_turn_id = None
+
+        # Any event whose turn_id is below this watermark belongs to an
+        # interrupted turn and must not touch the face or the caption.
+        # Barge-in advances the watermark past the turn it interrupted.
+        self._turn_watermark = 0
+
+        # A greeting that arrived while Greeto was answering is spoken
+        # when the current turn ends instead of being dropped, because
+        # VisionService will not ask again within the same sitting.
+        self._pending_greeting = None
 
         self._pending_response = None
 
@@ -232,6 +247,16 @@ class KioskPresenter(QObject):
 
             self._on_sentence_finished(payload)
 
+        elif event_name == "speech.barge_in":
+
+            self._on_barge_in(payload)
+
+        elif event_name == "tts.stopped":
+
+            if payload.get("interrupted"):
+
+                self._on_barge_in(payload)
+
         elif event_name == "speech.recording_started":
 
             self._on_recording_started()
@@ -266,15 +291,17 @@ class KioskPresenter(QObject):
 
             return
 
+        logger.debug(
+            "Greeting event: name=%r greet=%r sitting=%r",
+            payload.get("name"),
+            payload.get("greet"),
+            payload.get("sitting_id"),
+        )
+
         # VisionService is authoritative: it sets greet=False for another
         # track belonging to an identity that was already greeted in this
         # sitting.
         if not payload.get("greet", True):
-
-            return
-
-        # A second visitor must not interrupt an answer in progress.
-        if self.busy:
 
             return
 
@@ -312,6 +339,30 @@ class KioskPresenter(QObject):
             self._greeted.clear()
             self._greeted.add(key)
 
+        # A second visitor must not interrupt an answer in progress. The
+        # greeting is queued instead of dropped: VisionService only asks
+        # once per sitting, so dropping it would strand the visitor
+        # ungreeted for the rest of that sitting.
+        if self.busy:
+
+            logger.info(
+                "Greeting for %s deferred until the active turn ends.",
+                name,
+            )
+
+            self._pending_greeting = {
+                "text": greeting_text,
+                "name": name.strip(),
+                "sitting_id": sitting_id,
+            }
+
+            return
+
+        self._present_greeting(greeting_text, name.strip(), sitting_id)
+
+    def _present_greeting(self, greeting_text, name, sitting_id):
+        """Show and speak a greeting that is allowed to start now."""
+
         self._cancel_schedule()
 
         self._set_state("greeting")
@@ -326,17 +377,38 @@ class KioskPresenter(QObject):
                 self._event_bus.publish(
                     "greeting.speak_requested",
                     text=greeting_text,
-                    name=name.strip(),
+                    name=name,
                     sitting_id=sitting_id,
                 )
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001 - greeting is optional
+                logger.warning("Greeting publish failed: %s", error)
 
         self._schedule(self.GREETING_HOLD_MS, self._enter_listening_or_idle)
+
+    def _flush_pending_greeting(self):
+        """Speak a greeting that was deferred while a turn was active."""
+
+        greeting = self._pending_greeting
+
+        if greeting is None or self.busy or not self.visitor_present:
+
+            return False
+
+        self._pending_greeting = None
+
+        logger.info("Speaking deferred greeting for %s.", greeting["name"])
+
+        self._present_greeting(
+            greeting["text"], greeting["name"], greeting["sitting_id"]
+        )
+
+        return True
 
     def _on_visitor_left(self):
 
         self.visitor_present = False
+
+        self._pending_greeting = None
 
         # If Greeto is still answering, finish the interaction first.
         if self.busy:
@@ -378,7 +450,7 @@ class KioskPresenter(QObject):
             "n/a",
         ):
 
-            return "Hello %s! Welcome back to I.T.S Engineering College." % name
+            return "Hello, %s. Welcome back to I.T.S Engineering College." % name
 
         return None
 
@@ -386,10 +458,22 @@ class KioskPresenter(QObject):
     # Conversation
     # -----------------------------------------------------
 
+    def _is_stale(self, turn_id):
+        """Return True for output that belongs to a superseded turn."""
+
+        if turn_id is None:
+
+            return False
+
+        return turn_id < self._turn_watermark
+
     def _on_processing(self, payload=None):
 
         if payload and isinstance(payload, dict) and "turn_id" in payload:
             self._active_turn_id = payload.get("turn_id")
+            self._turn_watermark = max(
+                self._turn_watermark, int(self._active_turn_id or 0)
+            )
 
         self.visitor_present = True
 
@@ -408,12 +492,7 @@ class KioskPresenter(QObject):
 
     def _on_response(self, payload):
 
-        turn_id = payload.get("turn_id")
-        if (
-            turn_id is not None
-            and self._active_turn_id is not None
-            and turn_id < self._active_turn_id
-        ):
+        if self._is_stale(payload.get("turn_id")):
             return
 
         self._pending_response = payload.get("response")
@@ -423,12 +502,7 @@ class KioskPresenter(QObject):
 
     def _on_speaking_started(self, payload):
 
-        turn_id = payload.get("turn_id")
-        if (
-            turn_id is not None
-            and self._active_turn_id is not None
-            and turn_id < self._active_turn_id
-        ):
+        if self._is_stale(payload.get("turn_id")):
             return
 
         self.busy = True
@@ -464,12 +538,7 @@ class KioskPresenter(QObject):
 
             return
 
-        turn_id = payload.get("turn_id")
-        if (
-            turn_id is not None
-            and self._active_turn_id is not None
-            and turn_id < self._active_turn_id
-        ):
+        if self._is_stale(payload.get("turn_id")):
 
             return
 
@@ -486,6 +555,38 @@ class KioskPresenter(QObject):
         self._set_state("happy")
 
         self._schedule(self.SUCCESS_HOLD_MS, self._enter_listening_or_idle)
+
+    def _on_barge_in(self, payload=None):
+        """Immediately clear the interrupted reply and start listening.
+
+        Greeting deduplication lives in ``_greeted`` / the sitting id, so
+        nothing here can cause a second greeting for the same visitor.
+        """
+
+        # Anything still in flight from the interrupted turn is stale now.
+        # Advancing the watermark past it is what stops a late caption or
+        # "speaking" state from reappearing over the new turn. tts.stopped
+        # carries the turn id even for a greeting, which has no
+        # conversation.processing event.
+        turn_id = (payload or {}).get("turn_id")
+
+        if turn_id is not None:
+
+            self._turn_watermark = max(self._turn_watermark, int(turn_id) + 1)
+
+        elif self.busy and self._active_turn_id is not None:
+
+            self._turn_watermark = max(
+                self._turn_watermark, int(self._active_turn_id) + 1
+            )
+
+        self._speaking_token = None
+        self._pending_response = None
+        self.busy = False
+        self._watchdog.stop()
+        self._cancel_schedule()
+        self.caption_clear.emit()
+        self._set_state("listening" if self.microphone_available else "idle")
 
     def _on_recording_started(self):
         if not self.busy and self.microphone_available:
@@ -616,6 +717,12 @@ class KioskPresenter(QObject):
         )
 
     def _enter_listening_or_idle(self):
+
+        # A greeting deferred during a turn is spoken now, before the face
+        # drops back to LISTENING.
+        if self._flush_pending_greeting():
+
+            return
 
         if self.visitor_present and self.microphone_available:
 
