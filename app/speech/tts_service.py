@@ -75,6 +75,15 @@ class TTSService:
         # over each other and keeps utterance numbers in playback order.
         self._speak_lock = threading.Lock()
 
+        # Barge-in support: stop() must be callable from the VAD/event-bus
+        # thread while speak() owns the speak lock. These fields are
+        # deliberately separate from that lock.
+        self._playback_lock = threading.Lock()
+        self._active_player = None
+        self._active_synth_process = None
+        self._stop_event = threading.Event()
+        self._stop_event.set()
+
         self.model_path = (
             Path(model_path)
             if model_path is not None
@@ -215,7 +224,18 @@ class TTSService:
             text=True,
         )
 
-        process.communicate(text)
+        # stop() cancels an in-flight synthesis process as well as the
+        # player, so a barge-in never waits for an obsolete sentence to
+        # finish rendering before audio is purged.
+        with self._playback_lock:
+            self._active_synth_process = process
+
+        try:
+            process.communicate(text)
+        finally:
+            with self._playback_lock:
+                if self._active_synth_process is process:
+                    self._active_synth_process = None
 
         if process.returncode not in (0, None):
             raise RuntimeError("Piper exited with code %s" % process.returncode)
@@ -249,15 +269,59 @@ class TTSService:
         """Return True if TTS is currently synthesizing or playing audio."""
         return self._is_speaking
 
-    def cancel(self) -> None:
-        """Cancel current synthesis or playback immediately."""
+    def stop(self, interrupted: bool = True) -> bool:
+        """Stop synthesis/playback immediately. Idempotent and thread-safe.
+
+        Called from the VAD thread on barge-in. The Windows purge and the
+        POSIX player terminate both return in well under 50 ms; synthesis
+        that has not reached playback is abandoned by the cancellation
+        flag before a WAV is played.
+        """
+
+        started = time_module.perf_counter()
+
         self._cancelled = True
+        self._stop_event.set()
+
+        with self._playback_lock:
+            player = self._active_player
+            synth_process = self._active_synth_process
+
+        for process in (player, synth_process):
+            if process is None:
+                continue
+            try:
+                process.terminate()
+            except Exception:
+                pass
+
         if sys.platform.startswith("win"):
             try:
                 import winsound
+
                 winsound.PlaySound(None, winsound.SND_PURGE)
             except Exception:
                 pass
+
+        elapsed_ms = (time_module.perf_counter() - started) * 1000.0
+
+        self._publish(
+            "tts.stopped",
+            interrupted=bool(interrupted),
+            stop_ms=elapsed_ms,
+            turn_id=self._active_turn_id,
+        )
+        self.logger.info(
+            "TTS stopped (interrupted=%s) in %.1fms.",
+            bool(interrupted),
+            elapsed_ms,
+        )
+        return True
+
+    def cancel(self) -> None:
+        """Backwards-compatible alias for :meth:`stop`."""
+
+        self.stop(interrupted=True)
 
     # -------------------------------------------------
 
@@ -280,10 +344,12 @@ class TTSService:
         with self._speak_lock:
             self._is_speaking = True
             self._cancelled = False
+            self._stop_event.clear()
             self._active_turn_id = turn_id
 
             # Publish synthesis start so VAD echo suppression begins immediately
             self._publish("speech.synthesis_started", turn_id=turn_id, text=clean_text)
+            self._publish("tts.started", turn_id=turn_id, text=clean_text)
 
             try:
                 # If conversational length (<= 250 chars), synthesize in a single pass
@@ -297,6 +363,12 @@ class TTSService:
                 return self._speak_sentences(clean_text, sentences, turn_id=turn_id)
             finally:
                 self._is_speaking = False
+                if not self._cancelled:
+                    self._publish(
+                        "tts.stopped",
+                        interrupted=False,
+                        turn_id=turn_id,
+                    )
 
     # -------------------------------------------------
 
@@ -555,13 +627,18 @@ class TTSService:
     # -------------------------------------------------
 
     def _play_audio(self, path: str) -> bool:
-        """Play generated WAV file.
+        """Play generated WAV file, interruptible by :meth:`stop`.
 
         Returns True when a player handled it.
         """
+        if self._cancelled:
+            return False
+
         if sys.platform.startswith("win"):
             import winsound
 
+            # SND_FILENAME blocks this thread; stop() calls
+            # PlaySound(None, SND_PURGE) from the VAD thread and aborts it.
             winsound.PlaySound(path, winsound.SND_FILENAME)
             return True
 
@@ -581,7 +658,17 @@ class TTSService:
             else:
                 command = [player, path]
 
-            subprocess.run(command, check=False)
+            process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            with self._playback_lock:
+                self._active_player = process
+
+            try:
+                process.wait()
+            finally:
+                with self._playback_lock:
+                    self._active_player = None
+
             return True
 
         logger.warning("No audio player found. Tried aplay, paplay and ffplay.")

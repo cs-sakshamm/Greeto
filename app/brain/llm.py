@@ -224,11 +224,18 @@ class LocalLLM:
 
         return output["choices"][0]["text"].strip()
 
-    def stream_generate(self, prompt: str, max_tokens: int | None = None):
+    def stream_generate(
+        self,
+        prompt: str,
+        max_tokens: int | None = None,
+        cancel_event=None,
+    ):
         """Stream a response token by token.
 
         The lock is held for the whole generation on purpose: one shared
-        llama.cpp context cannot serve two conversations at once.
+        llama.cpp context cannot serve two conversations at once. When
+        ``cancel_event`` is set (voice barge-in), generation stops on the
+        very next token callback instead of waiting for the reply to finish.
         """
 
         with self.lock:
@@ -240,6 +247,9 @@ class LocalLLM:
             )
 
             for chunk in stream:
+
+                if cancel_event is not None and cancel_event.is_set():
+                    return
 
                 token = chunk["choices"][0]["text"]
 
