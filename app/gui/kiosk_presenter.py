@@ -410,6 +410,14 @@ class KioskPresenter(QObject):
 
         self._pending_greeting = None
 
+        # VisionService only publishes visitor.left after the whole
+        # absence_timeout_s, which also ended the sitting, so no greeting
+        # dedupe entry from it is still meaningful. Dropping them means a
+        # returning visitor is greeted as a new sitting even if the
+        # sitting id were reused. Barge-in never comes through here, so a
+        # mid-sitting interruption cannot re-trigger a greeting.
+        self._greeted.clear()
+
         # If Greeto is still answering, finish the interaction first.
         if self.busy:
 

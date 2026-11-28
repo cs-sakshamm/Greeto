@@ -1,13 +1,28 @@
 # Recognition settings (Phase 3, Milestone 2).
 #
-# threshold is cosine similarity: 1.0 is identical, 0.55 is the
-# existing Greeto default. Run scripts/calibrate_threshold.py once at
-# least two identities with several photos each are enrolled; without
-# impostor pairs the script cannot estimate a data-driven threshold and
-# keeps this value.
+# threshold is cosine similarity: 1.0 is identical. 0.55 is fine for
+# studio-quality reference photos, but live webcam frames (lighting, pose,
+# distance) score lower, so the kiosk default is 0.45. decision_margin is
+# the required lead over the second-best enrolled identity: a near-tie
+# between two people is treated as unknown instead of greeting the wrong
+# person. Recalibrate with scripts/calibrate_threshold.py once at least two
+# identities with several photos each are enrolled.
 recognition:
 
-  threshold: 0.55
+  threshold: 0.45
+
+  decision_margin: 0.05
+
+  # A match must repeat for this many consecutive recognition cycles
+  # before it can greet or answer "Do you recognize me?". Live frames are
+  # noisy; one lucky frame is not an identity.
+  confirmation_frames: 2
+
+  # Throttle for the live "Vision match:" diagnostic line (seconds).
+  # A state/identity transition may log sooner than this, but never more
+  # than twice a second; an unchanged decision logs at most once per
+  # interval, never once per frame.
+  diagnostic_interval_s: 2.0
 
   # Faces below either gate are tracked but never compared, so a blurry
   # or tiny detection cannot produce a confident wrong match.
@@ -54,7 +69,9 @@ greeting:
   # Once a known person is greeted, the sitting stays open until they
   # have been unseen for this long. Tracker flicker, bbox jitter and
   # periodic re-recognition inside this window are all the same sitting.
-  absence_timeout_s: 20.0
+  # 3 s is long enough to survive a blink/occlusion and short enough that
+  # stepping away and coming back starts a fresh sitting and greets again.
+  absence_timeout_s: 3.0
 
   # null follows recognition.threshold. Set a higher value to require
   # even stronger confidence before a greeting is spoken.

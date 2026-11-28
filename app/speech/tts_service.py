@@ -24,8 +24,11 @@ import sys
 import tempfile
 import threading
 import time as time_module
+import wave
 from pathlib import Path
 from typing import Optional
+
+import numpy as np
 
 from app.core.container import ServiceContainer
 
@@ -81,8 +84,14 @@ class TTSService:
         self._playback_lock = threading.Lock()
         self._active_player = None
         self._active_synth_process = None
+        self._active_stream = None
         self._stop_event = threading.Event()
         self._stop_event.set()
+
+        # Playback is written to the output device in small blocks so
+        # stop() can cut the speaker within one block (~20-40 ms), which
+        # a single blocking winsound call cannot do.
+        self._playback_block_frames = 1024
 
         self.model_path = (
             Path(model_path)
@@ -286,6 +295,16 @@ class TTSService:
         with self._playback_lock:
             player = self._active_player
             synth_process = self._active_synth_process
+            stream = self._active_stream
+
+        # Abort the audio output stream first: it is what the visitor is
+        # actually hearing, and aborting unblocks the playback thread's
+        # pending write() immediately.
+        if stream is not None:
+            try:
+                stream.abort()
+            except Exception:
+                pass
 
         for process in (player, synth_process):
             if process is None:
@@ -299,7 +318,16 @@ class TTSService:
             try:
                 import winsound
 
+                # Fallback for the winsound playback path. None + 0 stops
+                # asynchronous playback; SND_PURGE covers the blocking
+                # path on the Windows versions that still honour it.
                 winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+            try:
+                import winsound
+
+                winsound.PlaySound(None, 0)
             except Exception:
                 pass
 
@@ -626,6 +654,211 @@ class TTSService:
 
     # -------------------------------------------------
 
+    @staticmethod
+    def _read_wav_float32(path: str):
+        """Decode a PCM WAV into a float32 ``(frames, channels)`` array."""
+
+        with wave.open(path, "rb") as wav_file:
+
+            channels = wav_file.getnchannels()
+            width = wav_file.getsampwidth()
+            rate = wav_file.getframerate()
+            raw = wav_file.readframes(wav_file.getnframes())
+
+        if not raw:
+            return None, rate, channels
+
+        if width == 1:
+
+            data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+
+        elif width == 2:
+
+            data = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+
+        elif width == 3:
+
+            triplets = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+            values = triplets[:, 0] | (triplets[:, 1] << 8) | (triplets[:, 2] << 16)
+            values = np.where(values >= 1 << 23, values - (1 << 24), values)
+            data = values.astype(np.float32) / float(1 << 23)
+
+        elif width == 4:
+
+            data = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+
+        else:
+
+            raise ValueError("unsupported WAV sample width: %s" % width)
+
+        return data.reshape(-1, channels), rate, channels
+
+    @staticmethod
+    def _wav_duration_s(path: str) -> float:
+        """Return the playback length of a WAV file in seconds."""
+
+        try:
+
+            with wave.open(path, "rb") as wav_file:
+
+                rate = wav_file.getframerate() or 1
+                return wav_file.getnframes() / float(rate)
+
+        except Exception:  # noqa: BLE001 - duration is only a timeout hint
+
+            return 0.0
+
+    def _play_with_output_stream(self, path: str) -> bool:
+        """Play a WAV in small blocks on an interruptible output stream.
+
+        This is the primary Windows path. ``winsound.PlaySound`` blocks the
+        playing thread for the whole file and cannot be reliably purged
+        from another thread on current Windows, which is why a live
+        barge-in never actually silenced Greeto. Writing blocks to a
+        sounddevice stream lets :meth:`stop` abort the stream (and thus the
+        pending write) in a few milliseconds.
+
+        Returns False when no output device is usable, so the caller can
+        fall back to a system player.
+        """
+
+        try:
+
+            import sounddevice as sd
+
+        except Exception:  # noqa: BLE001 - optional at runtime
+
+            return False
+
+        try:
+
+            samples, rate, channels = self._read_wav_float32(path)
+
+        except Exception as error:  # noqa: BLE001
+
+            self.logger.warning("Could not decode the generated WAV: %s", error)
+
+            return False
+
+        if samples is None or not len(samples):
+
+            return False
+
+        try:
+
+            stream = sd.OutputStream(
+                samplerate=rate,
+                channels=channels,
+                dtype="float32",
+            )
+
+        except Exception as error:  # noqa: BLE001 - no device / busy device
+
+            self.logger.warning(
+                "sounddevice output unavailable (%s); using a system player.",
+                error,
+            )
+
+            return False
+
+        block = self._playback_block_frames
+
+        try:
+
+            with self._playback_lock:
+
+                self._active_stream = stream
+
+            stream.start()
+
+            for start in range(0, len(samples), block):
+
+                if self._stop_event.is_set() or self._cancelled:
+
+                    break
+
+                stream.write(np.ascontiguousarray(samples[start : start + block]))
+
+        except Exception as error:  # noqa: BLE001
+
+            if self._stop_event.is_set() or self._cancelled:
+
+                # stop() aborted the stream underneath write(); that is the
+                # interruption working, not a playback failure.
+                return True
+
+            self.logger.warning(
+                "sounddevice playback failed (%s); using a system player.",
+                error,
+            )
+
+            return False
+
+        finally:
+
+            with self._playback_lock:
+
+                if self._active_stream is stream:
+
+                    self._active_stream = None
+
+            try:
+
+                stream.stop()
+
+            except Exception:
+
+                pass
+
+            try:
+
+                stream.close()
+
+            except Exception:
+
+                pass
+
+        return True
+
+    def _play_with_winsound(self, path: str) -> bool:
+        """Chunked asynchronous winsound playback for a missing stream."""
+
+        import winsound
+
+        duration = self._wav_duration_s(path)
+
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+
+        deadline = time_module.perf_counter() + duration + 1.0
+
+        try:
+
+            while time_module.perf_counter() < deadline:
+
+                if self._stop_event.wait(0.02):
+
+                    break
+
+        finally:
+
+            try:
+
+                winsound.PlaySound(None, winsound.SND_PURGE)
+
+            except Exception:
+
+                pass
+
+            try:
+
+                winsound.PlaySound(None, 0)
+
+            except Exception:
+
+                pass
+
+        return True
+
     def _play_audio(self, path: str) -> bool:
         """Play generated WAV file, interruptible by :meth:`stop`.
 
@@ -634,13 +867,17 @@ class TTSService:
         if self._cancelled:
             return False
 
-        if sys.platform.startswith("win"):
-            import winsound
+        if self._play_with_output_stream(path):
 
-            # SND_FILENAME blocks this thread; stop() calls
-            # PlaySound(None, SND_PURGE) from the VAD thread and aborts it.
-            winsound.PlaySound(path, winsound.SND_FILENAME)
             return True
+
+        if self._cancelled or self._stop_event.is_set():
+
+            return False
+
+        if sys.platform.startswith("win"):
+
+            return self._play_with_winsound(path)
 
         for player in ("aplay", "paplay", "ffplay"):
             if shutil.which(player) is None:

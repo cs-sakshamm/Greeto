@@ -35,7 +35,12 @@ from app.brain.llm import LocalLLM
 from app.brain.prompt_manager import PromptManager
 from app.brain.parser import ResponseParser, LLMResponse
 from app.brain.knowledge_base import KnowledgeBase
-from app.brain.streaming import ReplyStreamExtractor, SentenceChunker
+from app.brain.streaming import (
+    ReplyStreamExtractor,
+    SentenceChunker,
+    strip_placeholders,
+    strip_reply_prefix,
+)
 from app.speech.transcript_normalizer import normalize_transcript
 
 
@@ -240,12 +245,7 @@ class ConversationManager:
             return answer
 
         answer = re.sub(r"[*_`#]+", "", answer)
-        answer = re.sub(
-            r"^(?:Your answer|Answer|Greeto|Assistant|[AQ])\s*:\s*",
-            "",
-            answer,
-            flags=re.IGNORECASE,
-        ).strip()
+        answer = strip_placeholders(strip_reply_prefix(answer).strip()).strip()
 
         # A bare phone number is accurate but not a sentence. Give the
         # visitor the context the model left implicit.
@@ -1130,13 +1130,26 @@ class ConversationManager:
                     self.logger.info(f"Turn {turn_id} superseded before LLM prompt build.")
                     return
 
-                prompt = self.prompt_manager.build_prompt(
-                    user_message=text,
-                    history=self.history,
-                    context=context,
-                )
+                lane = "college" if college_related else "general"
 
-                self.logger.info("Generating AI response...")
+                try:
+                    prompt = self.prompt_manager.build_prompt(
+                        user_message=text,
+                        history=self.history,
+                        context=context if college_related else "",
+                        lane=lane,
+                    )
+                except TypeError:
+                    # Older prompt managers do not know about lanes.
+                    prompt = self.prompt_manager.build_prompt(
+                        user_message=text,
+                        history=self.history,
+                        context=context,
+                    )
+
+                self.logger.info(
+                    "Generating AI response (lane=%s)...", lane
+                )
 
                 response_text = ""
 
@@ -1162,12 +1175,17 @@ class ConversationManager:
 
                 try:
                     token_stream = self.llm.stream_generate(
-                        prompt, cancel_event=cancel_event
+                        prompt, cancel_event=cancel_event, lane=lane
                     )
                 except TypeError:
                     # Test doubles / older local wrappers accept only the
                     # prompt. The token-loop guard below still cancels them.
-                    token_stream = self.llm.stream_generate(prompt)
+                    try:
+                        token_stream = self.llm.stream_generate(
+                            prompt, cancel_event=cancel_event
+                        )
+                    except TypeError:
+                        token_stream = self.llm.stream_generate(prompt)
 
                 for token in token_stream:
                     if cancel_event.is_set():

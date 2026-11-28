@@ -28,12 +28,24 @@ model:
   n_gpu_layers: -1
 
 generation:
-  # Short spoken kiosk answers: 1-3 sentences. Keeping this tight bounds
-  # the worst-case generation time after the first token.
+  # Strict college lane: short spoken kiosk answers (1-3 sentences) from
+  # the verified knowledge base. A low temperature keeps fees, dates and
+  # phone numbers deterministic.
   max_tokens: 96
   temperature: 0.2
   top_p: 0.8
   repeat_penalty: 1.05
+
+  # General conversational lane (Option A). General knowledge, study,
+  # career and everyday questions are answered by the same model, so they
+  # may be a little more varied and slightly longer than a factual answer.
+  # These values only apply to prompts built with the general system
+  # prompt; college questions keep the strict values above.
+  general:
+    max_tokens: 140
+    temperature: 0.45
+    top_p: 0.9
+    repeat_penalty: 1.12
 
   # Qwen3 models emit reasoning tokens unless disabled. Qwen2.5 has no
   # thinking phase, so this is a no-op there.
@@ -45,10 +57,11 @@ prompt:
   # of the ChatML prompt so llama.cpp can reuse the KV-cache prefix across
   # turns; retrieved context and the question live in the user turn.
   #
-  # Hybrid routing (Option A) lives in PromptManager.SYSTEM_RULES: college
-  # questions are answered only from the retrieved knowledge, while
-  # general conversation is answered normally without inventing college
-  # facts. "Who are you?" is answered deterministically by
+  # Hybrid routing (Option A): college questions use PromptManager's strict
+  # rules and the retrieved knowledge only, while general conversation uses
+  # PromptManager.general_system_prompt() with no knowledge block, so a
+  # small model cannot answer small talk with the admission-database
+  # refusal. "Who are you?" is answered deterministically by
   # ConversationManager before the model is invoked.
   max_context_chars: 1100
   max_history_messages: 4

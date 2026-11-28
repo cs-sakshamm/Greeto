@@ -37,12 +37,37 @@ class PromptManager:
         "If the question is general conversation or general knowledge that is "
         "not about the college, answer it helpfully and naturally like a "
         "normal assistant, without inventing any college fact, fee or policy.\n"
-        "Reply with one JSON object only, no markdown:\n"
-        '{"reply": "your answer", "emotion": "happy", "action": "answer"}\n'
-        "emotion must be happy, neutral or empathetic. action must be "
-        "answer.\n"
-        "The reply must be 1-3 short, natural spoken sentences. Never use "
-        "bullet points, lists or headings, and do not repeat the question."
+        "Reply with one JSON object only, no markdown. It must contain a "
+        "\"reply\" string holding your spoken answer, an \"emotion\" that is "
+        "happy, neutral or empathetic, and an \"action\" that is answer.\n"
+        "The \"reply\" value must be 1-3 short, natural spoken sentences. "
+        "Never use bullet points, lists, headings or placeholder text, and "
+        "do not repeat the question."
+    )
+
+    # General conversational lane (Option A). Kept separate from the strict
+    # college rules because a single prompt that mixes both makes a small
+    # model answer small talk like a database lookup: either a rigid
+    # not-found refusal or, worse, an invented college fact. This lane never
+    # receives retrieved knowledge, so there is nothing to copy or deny.
+    GENERAL_SYSTEM_RULES = (
+        "You are Greeto, a warm and articulate AI receptionist at I.T.S "
+        "Engineering College, Greater Noida.\n"
+        "Answer the visitor's general question directly and naturally, like "
+        "a knowledgeable human receptionist having a short conversation. "
+        "Use 2-3 clear spoken sentences, with plain words and no lists.\n"
+        "Never use markdown, bullet points, headings or labels of any kind, "
+        "and do not mention a college database.\n"
+        "If the visitor asks for a specific I.T.S Engineering College fee, "
+        "date, eligibility rule or policy that you were not given, do not "
+        "invent a number or detail. Say you will check with the admission "
+        "office, and suggest calling 1800-180-0840.\n"
+        "Reply with one JSON object only, no markdown. It must contain a "
+        "\"reply\" string holding your spoken answer, an \"emotion\" that is "
+        "happy, neutral or empathetic, and an \"action\" that is answer.\n"
+        "The \"reply\" value must be 1-3 short, natural spoken sentences, "
+        "must never contain placeholder text, and must not repeat the "
+        "question."
     )
 
     @classmethod
@@ -58,9 +83,23 @@ class PromptManager:
         prompt = cls.SYSTEM_RULES
 
         if disable_thinking:
+
             prompt += "\n/no_think"
 
         return prompt
+
+    @classmethod
+    def general_system_prompt(cls, disable_thinking: bool = False) -> str:
+        """Return the system block for the general conversational lane."""
+
+        prompt = cls.GENERAL_SYSTEM_RULES
+
+        if disable_thinking:
+
+            prompt += "\n/no_think"
+
+        return prompt
+
 
     def __init__(self, style: str = "qwen", config=None) -> None:
 
@@ -144,7 +183,20 @@ class PromptManager:
         user_message: str,
         history: list[dict[str, str]],
         context: str = "",
+        lane: str = "college",
     ) -> str:
+        """Build one prompt for either the college or the general lane.
+
+        The general lane deliberately gets no retrieved knowledge block:
+        injecting "no relevant college knowledge" makes a small model
+        answer ordinary conversation with the admission-database refusal.
+        Recent history is always included there, because general chat is
+        where follow-ups and pronouns actually depend on the previous turn.
+        """
+
+        if str(lane).casefold() == "general":
+
+            return self._build_general_prompt(user_message, history)
 
         knowledge = (context or "").strip()
 
@@ -208,6 +260,64 @@ class PromptManager:
             prompt += "Conversation so far:\n%s\n\n" % "\n".join(conversation)
 
         prompt += "Question: %s<|im_end|>\n" % question
+
+        prompt += "<|im_start|>assistant\n"
+
+        return prompt
+
+    # -------------------------------------------------------------
+
+    def _general_history(self, history) -> str:
+        """Render recent turns for the general lane."""
+
+        if not self.max_history_messages:
+
+            return ""
+
+        lines = []
+
+        for message in history[-self.max_history_messages :]:
+
+            role = str(message.get("role", "user")).capitalize()
+
+            content = str(message.get("content", "")).strip()
+
+            if content:
+
+                lines.append("%s: %s" % (role, content))
+
+        return "\n".join(lines)
+
+    def _build_general_prompt(self, user_message, history) -> str:
+        """Build a clean, knowledge-free prompt for general conversation."""
+
+        question = (user_message or "").strip()
+
+        conversation = self._general_history(history)
+
+        system = self.general_system_prompt(self.disable_thinking)
+
+        if self.style == "gemma":
+
+            prompt = "System:\n%s\n\n" % system
+
+            if conversation:
+
+                prompt += "Conversation so far:\n%s\n\n" % conversation
+
+            prompt += "User: %s\nAssistant:\n" % question
+
+            return prompt
+
+        prompt = "<|im_start|>system\n%s<|im_end|>\n" % system
+
+        prompt += "<|im_start|>user\n"
+
+        if conversation:
+
+            prompt += "Conversation so far:\n%s\n\n" % conversation
+
+        prompt += "%s<|im_end|>\n" % question
 
         prompt += "<|im_start|>assistant\n"
 

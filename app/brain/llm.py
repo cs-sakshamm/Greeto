@@ -102,6 +102,11 @@ class LocalLLM:
             self._setting("generation", "repeat_penalty", default=1.05), 1.05
         )
 
+        # General conversation may be a little more varied than a college
+        # fact, which must stay deterministic. ``generation.general`` is
+        # optional; missing keys inherit the strict values above.
+        self.general_sampling = self._general_sampling_options()
+
         n_ctx = max(
             256,
             _as_int(self._setting("model", "n_ctx", default=1024), 1024),
@@ -204,23 +209,58 @@ class LocalLLM:
     # Generation
     # -------------------------------------------------------------
 
-    def _sampling_options(self, max_tokens: int | None = None) -> dict:
+    def _general_sampling_options(self) -> dict:
+        """Read optional general-lane overrides from ``generation.general``."""
+
+        mapping = self._setting("generation", "general", default={})
+
+        if not isinstance(mapping, dict):
+
+            return {}
+
+        return {
+            "max_tokens": max(16, _as_int(mapping.get("max_tokens"), self.max_tokens)),
+            "temperature": _as_float(
+                mapping.get("temperature"), self.temperature
+            ),
+            "top_p": _as_float(mapping.get("top_p"), self.top_p),
+            "repeat_penalty": _as_float(
+                mapping.get("repeat_penalty"), self.repeat_penalty
+            ),
+        }
+
+    def _sampling_options(
+        self,
+        max_tokens: int | None = None,
+        lane: str = "college",
+    ) -> dict:
         options = {
-            "max_tokens": max_tokens or self.max_tokens,
+            "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "top_p": self.top_p,
             "repeat_penalty": self.repeat_penalty,
         }
+
+        if str(lane).casefold() == "general" and self.general_sampling:
+
+            options.update(self.general_sampling)
+
+        if max_tokens:
+
+            options["max_tokens"] = max_tokens
+
         if self.prompt_style == "qwen":
             options["stop"] = list(self.CHATML_STOPS)
         return options
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, lane: str = "college") -> str:
         """Generate a complete response."""
 
         with self.lock:
 
-            output = self.model(prompt, **self._sampling_options())
+            output = self.model(
+                prompt, **self._sampling_options(lane=lane)
+            )
 
         return output["choices"][0]["text"].strip()
 
@@ -229,6 +269,7 @@ class LocalLLM:
         prompt: str,
         max_tokens: int | None = None,
         cancel_event=None,
+        lane: str = "college",
     ):
         """Stream a response token by token.
 
@@ -243,7 +284,7 @@ class LocalLLM:
             stream = self.model(
                 prompt,
                 stream=True,
-                **self._sampling_options(max_tokens),
+                **self._sampling_options(max_tokens, lane=lane),
             )
 
             for chunk in stream:

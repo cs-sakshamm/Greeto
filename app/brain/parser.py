@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from app.brain.streaming import strip_placeholders, strip_reply_prefix
+
 logger = logging.getLogger(__name__)
 
 
@@ -188,14 +190,9 @@ class ResponseParser:
             flags=re.IGNORECASE,
         )[0].strip()
 
-        # Strip typical prompt echoes / speaker tags
-        cleaned = re.sub(
-            r"^(?:Your answer|Assistant|Greeto|Response|Reply|Answer|AI|Model|[AQ])"
-            r"\s*:\s*",
-            "",
-            cleaned,
-            flags=re.IGNORECASE,
-        ).strip()
+        # Strip typical prompt echoes / speaker tags with the same helper
+        # the streaming path uses, so the two can never drift apart.
+        cleaned = strip_placeholders(strip_reply_prefix(cleaned).strip())
 
         if not cleaned:
             return LLMResponse(
@@ -216,12 +213,7 @@ class ResponseParser:
     def _build_response_from_dict(self, data: dict) -> LLMResponse:
         """Normalize dict keys and values into an LLMResponse."""
         reply = str(data.get("reply", "") or "").strip()
-        reply = re.sub(
-            r"^(?:Your answer|Answer|Greeto|Assistant|[AQ])\s*:\s*",
-            "",
-            reply,
-            flags=re.IGNORECASE,
-        ).strip()
+        reply = strip_placeholders(strip_reply_prefix(reply).strip())
         emotion = str(data.get("emotion", "neutral") or "neutral").lower().strip()
         action = str(data.get("action", "answer") or "answer").lower().strip()
 

@@ -473,7 +473,14 @@ def test_pin_hashing_and_verification():
     assert second != encoded
     assert verify_pin("1234", second) is True
 
-    tampered = encoded[:-1] + ("A" if encoded[-1] != "A" else "B")
+    # Tamper a character that carries real digest bits. The final base64
+    # character of a 32-byte digest is mostly padding, so flipping it can
+    # decode to the same bytes and make this check non-deterministic.
+    algorithm, iterations, salt, digest = encoded.split("$")
+    first = "A" if digest[0] != "A" else "B"
+    tampered = "$".join(
+        (algorithm, iterations, salt, first + digest[1:])
+    )
 
     assert verify_pin("1234", tampered) is False
 

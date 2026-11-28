@@ -186,8 +186,13 @@ class SpeechService:
         )
         self.barge_in_min_speech_ms = max(
             1,
-            int(self._cfg("speech", "barge_in", "min_speech_ms", default=200)),
+            int(self._cfg("speech", "barge_in", "min_speech_ms", default=160)),
         )
+        # A laptop/desk mic hears a visitor at RMS ~0.004-0.015. The old
+        # 1.8x gate on top of the VAD threshold put the bar above normal
+        # speech, so a live barge-in could never fire. 1.3x above the
+        # recent noise/playback floor is reachable while still rejecting
+        # Greeto's own speaker bleed.
         self.barge_in_energy_multiplier = max(
             1.0,
             float(
@@ -195,7 +200,7 @@ class SpeechService:
                     "speech",
                     "barge_in",
                     "playback_vad_threshold_multiplier",
-                    default=1.8,
+                    default=1.3,
                 )
             ),
         )
@@ -227,6 +232,16 @@ class SpeechService:
         self._last_barge_in = 0.0
         self._barge_in_utterance = False
         self._barge_in_pre: collections.deque[np.ndarray] = collections.deque(maxlen=2)
+
+        # Rolling RMS window used to estimate the live noise/playback floor
+        # while Greeto is speaking (~3 s at a 1024-sample chunk). The
+        # barge-in gate tracks this instead of a hard-coded constant, so a
+        # quiet room is easy to interrupt in and a loud one does not
+        # self-interrupt.
+        self._playback_rms_window: collections.deque[float] = collections.deque(
+            maxlen=47
+        )
+        self._last_barge_in_diag = 0.0
 
         # State management
         self.state = self.STATE_IDLE
@@ -407,6 +422,7 @@ class SpeechService:
         self._barge_in_streak = 0
         self._barge_in_silence = 0
         self._barge_in_pre.clear()
+        self._playback_rms_window.clear()
 
     @property
     def visitor_in_frame(self) -> bool:
@@ -417,13 +433,33 @@ class SpeechService:
             return True
         return self._visitor_in_frame
 
+    def _playback_noise_floor(self) -> float:
+        """Estimate the current playback/noise floor from recent chunks.
+
+        The 20th percentile of the last ~3 s is used so a single loud
+        syllable (or a burst of Greeto's own speech) cannot raise the gate
+        for the whole utterance. Only frames observed during playback feed
+        this window, so it measures what the mic actually hears while the
+        speaker is on.
+        """
+
+        if not self._playback_rms_window:
+
+            return 0.0
+
+        ordered = sorted(self._playback_rms_window)
+
+        return ordered[max(0, len(ordered) // 5)]
+
     def _barge_in_threshold(self) -> float:
         """Return the RMS gate used while Greeto is speaking."""
 
         if self.barge_in_energy_floor > 0.0:
             return self.barge_in_energy_floor
 
-        return self.vad.energy_threshold * self.barge_in_energy_multiplier
+        base = max(self.vad.energy_threshold, self._playback_noise_floor())
+
+        return base * self.barge_in_energy_multiplier
 
     def _handle_barge_in_chunk(self, audio: np.ndarray) -> None:
         """Monitor mic input while Piper is playing and fire a barge-in.
@@ -442,10 +478,20 @@ class SpeechService:
             self._barge_in_pre.append(audio)
             return
 
-        threshold = self._barge_in_threshold()
         rms = self.vad.calculate_energy(audio)
+
+        # Only quiet chunks describe the room: feeding the visitor's own
+        # speech into the floor would raise the gate above the interruption
+        # it is meant to detect. The pre-gate uses the current floor.
+        if rms < self._barge_in_threshold():
+
+            self._playback_rms_window.append(rms)
+
+        threshold = self._barge_in_threshold()
         loud = rms >= threshold
         voiced = loud and self.vad.is_speech(audio)
+
+        self._log_barge_in_diagnostics(rms, threshold, voiced, now)
 
         if not self._barge_in_candidate:
             if not voiced:
@@ -494,6 +540,43 @@ class SpeechService:
             self.total_samples_recorded = 0
             self._barge_in_silence = 0
 
+    def _log_barge_in_diagnostics(
+        self,
+        rms: float,
+        threshold: float,
+        voiced: bool,
+        now: float,
+    ) -> None:
+        """Explain barge-in gating at most once every two seconds.
+
+        A live miss is usually one of two things: the visitor is quieter
+        than the gate, or the gate is audible but the VAD rejects it. This
+        line makes which one obvious without flooding the terminal.
+        """
+
+        if now - self._last_barge_in_diag < 2.0:
+
+            return
+
+        approaching = threshold > 0 and rms >= 0.7 * threshold
+
+        if not approaching:
+
+            return
+
+        self._last_barge_in_diag = now
+
+        self.logger.info(
+            "Barge-in probe: rms=%.4f gate=%.4f floor=%.4f voiced=%s "
+            "candidate=%s streak=%d",
+            rms,
+            threshold,
+            self._playback_noise_floor(),
+            voiced,
+            self._barge_in_candidate,
+            self._barge_in_streak,
+        )
+
     def _fire_barge_in(self, now: float, rms: float) -> None:
         self._barge_in_fired = True
         self._last_barge_in = now
@@ -517,9 +600,12 @@ class SpeechService:
         )
         self._publish("speech.recording_started")
         self.logger.info(
-            "Barge-in accepted after %.0fms of speech (rms=%.4f).",
+            "Barge-in accepted after %.0fms of speech (rms=%.4f, "
+            "gate=%.4f, floor=%.4f).",
             self.barge_in_min_speech_ms,
             rms,
+            self._barge_in_threshold(),
+            self._playback_noise_floor(),
         )
 
     def set_vad_parameters(self, silence_ms: Optional[int] = None, 

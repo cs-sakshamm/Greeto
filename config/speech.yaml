@@ -71,11 +71,16 @@ barge_in:
   # Disable only for a voice-only deployment without a camera.
   require_visitor_in_frame: true
   # Sustained speech needed before the interruption is accepted.
-  min_speech_ms: 200
+  # 160 ms (about 2.5 chunks) accepts a real "wait, stop" without letting
+  # a cough or a click interrupt the answer.
+  min_speech_ms: 160
   # The VAD energy gate is raised by this factor while Piper is playing,
   # so Greeto's own speaker output cannot trigger self-interruption.
-  # This is applied after audio.input_gain.
-  playback_vad_threshold_multiplier: 1.8
+  # This is applied after audio.input_gain, above the adaptive floor (the
+  # 20th percentile of the last ~3 s of playback-time RMS), so a quiet
+  # laptop mic is interruptible instead of needing a shout. Raise toward
+  # 1.5-1.8 only if Greeto interrupts itself on loud speakers.
+  playback_vad_threshold_multiplier: 1.3
   # Optional absolute RMS gate (after input gain) for a calibrated mic.
   # Leave null to derive the gate from the VAD energy threshold above.
   energy_threshold: null

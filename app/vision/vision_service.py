@@ -161,6 +161,41 @@ class VisionService:
         except (TypeError, ValueError):
             self.greeting_min_confidence = None
 
+        # A live webcam frame is noisy; a match is only trusted after it
+        # repeats for this many consecutive recognition cycles. The kiosk
+        # config uses 2. The default stays 1 so event-only deployments and
+        # tests see the immediate decision.
+        try:
+            self.confirmation_frames = max(
+                1,
+                int(
+                    self._config_value(
+                        "recognition", "confirmation_frames", default=1
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self.confirmation_frames = 1
+
+        # One recognition diagnostic line every couple of seconds is enough
+        # to tune a live camera without flooding the terminal.
+        try:
+            self._diagnostic_interval_s = max(
+                0.5,
+                float(
+                    self._config_value(
+                        "recognition", "diagnostic_interval_s", default=2.0
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self._diagnostic_interval_s = 2.0
+
+        self._identity_streaks: dict[str, int] = {}
+        self._confirmed_identities: set[str] = set()
+        self._last_diagnostic_at = 0.0
+        self._last_diagnostic_key = None
+
         # identity key -> {id, name, first_seen, last_seen, greeted, tracks}
         self._sittings: dict[str, dict] = {}
         self._sitting_counter = 0
@@ -721,6 +756,164 @@ class VisionService:
 
             return dict(self._current_identity)
 
+    def _update_match_streaks(self, faces: list[Face]) -> None:
+        """Track how many consecutive cycles each identity matched.
+
+        A name only enters ``_confirmed_identities`` after
+        ``confirmation_frames`` consecutive recognized cycles. When the
+        person leaves the frame the streak is dropped, so a returning
+        visitor is confirmed again instead of inheriting a stale decision.
+        """
+
+        present: dict[str, float] = {}
+
+        for face in faces:
+
+            if not face.recognized:
+
+                continue
+
+            if not self._is_valid_identity_name(face.name):
+
+                continue
+
+            score = face.recognition_score
+
+            if score is None:
+
+                continue
+
+            try:
+
+                score = float(score)
+
+            except (TypeError, ValueError):
+
+                continue
+
+            if score < self.recognizer.threshold:
+
+                continue
+
+            key = face.name.strip().casefold()
+
+            present[key] = max(present.get(key, 0.0), score)
+
+        for key in list(self._identity_streaks):
+
+            if key not in present:
+
+                self._identity_streaks.pop(key, None)
+                self._confirmed_identities.discard(key)
+
+        for key in present:
+
+            count = self._identity_streaks.get(key, 0) + 1
+
+            self._identity_streaks[key] = count
+
+            if count >= self.confirmation_frames:
+
+                self._confirmed_identities.add(key)
+
+    # Hard floor between two recognition diagnostic lines even when the
+    # decision changes, so frame-to-frame flicker can never spam the
+    # terminal. The steady-state interval is ``diagnostic_interval_s``.
+    DIAGNOSTIC_TRANSITION_MIN_S = 0.5
+
+    def _log_recognition_diagnostics(
+        self,
+        faces: list[Face],
+        now: float,
+    ) -> None:
+        """Log the live match decision at a throttled interval.
+
+        The line shows exactly why a visitor was or was not greeted:
+        candidate name, cosine score, effective threshold, face size and
+        how many confirmation frames have accumulated.
+
+        The throttle key deliberately excludes the bounding box: a live
+        face jitters a pixel or two every frame, and a bbox-keyed line
+        would print on every detection cycle.
+        """
+
+        if not faces:
+
+            return
+
+        best = None
+        best_score = None
+
+        for face in faces:
+
+            result = face.recognition
+
+            score = result.score if result is not None else None
+
+            if score is None:
+                continue
+
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                continue
+
+            if best_score is None or score > best_score:
+
+                best, best_score = face, score
+
+        face = best if best is not None else faces[0]
+        result = face.recognition
+
+        candidate = getattr(result, "candidate", None) if result else None
+        status = getattr(result, "status", "not_processed") if result else "not_processed"
+        score = best_score if best_score is not None else face.confidence
+
+        name = self._known_identity(face)
+        decision = "recognized" if name else "unknown"
+
+        try:
+            streak = self._identity_streaks.get(
+                str(candidate or "").strip().casefold(), 0
+            )
+        except Exception:  # noqa: BLE001 - diagnostics must never crash
+            streak = 0
+
+        key = (candidate, status, decision)
+
+        elapsed = now - self._last_diagnostic_at
+
+        if key == self._last_diagnostic_key:
+
+            # Nothing changed: only the slow periodic heartbeat is useful.
+            if elapsed < self._diagnostic_interval_s:
+
+                return
+
+        elif elapsed < self.DIAGNOSTIC_TRANSITION_MIN_S:
+
+            # The decision changed, but two lines in half a second is
+            # already as noisy as this diagnostic is allowed to get.
+            return
+
+        self._last_diagnostic_key = key
+        self._last_diagnostic_at = now
+
+        self.logger.info(
+            "Vision match: candidate=%s score=%.3f threshold=%.2f "
+            "margin=%.2f bbox=%dx%d status=%s confirmed=%d/%d -> %s",
+            candidate or "none",
+            float(score or 0.0),
+            self.recognizer.threshold,
+            self.recognizer.margin,
+            face.width,
+            face.height,
+            status,
+            streak,
+            self.confirmation_frames,
+            decision,
+        )
+
     def _update_current_identity(self, faces: list[Face]) -> None:
         """Refresh the live identity snapshot from one recognition cycle."""
 
@@ -775,6 +968,8 @@ class VisionService:
 
         now = time.monotonic() if now is None else now
 
+        self._update_match_streaks(faces)
+        self._log_recognition_diagnostics(faces, now)
         self._update_current_identity(faces)
 
         if self.event_bus is None:
@@ -830,9 +1025,15 @@ class VisionService:
 
                 sitting = self._sittings.pop(key)
 
+                # A returning visitor must be confirmed from fresh frames,
+                # not from a streak that survived the absence.
+                self._identity_streaks.pop(key, None)
+                self._confirmed_identities.discard(key)
+
                 self.logger.info(
-                    "Sitting ended for %s after %.1fs unseen; the next "
+                    "Sitting #%d ended for %s after %.1fs unseen; the next "
                     "appearance is a new sitting.",
+                    sitting["id"],
                     sitting["name"],
                     now - sitting["last_seen"],
                 )
@@ -848,6 +1049,12 @@ class VisionService:
         ):
 
             self._visitor_present = False
+
+            # Nobody is in frame: no identity is current, so the next
+            # detection starts clean and a returning visitor is greeted
+            # again under a new sitting id.
+            self._identity_streaks.clear()
+            self._confirmed_identities.clear()
 
             self._publish("visitor.left")
 
@@ -940,6 +1147,13 @@ class VisionService:
             return None
 
         if score < threshold:
+
+            return None
+
+        if (
+            name.strip().casefold()
+            not in self._confirmed_identities
+        ):
 
             return None
 

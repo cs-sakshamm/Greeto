@@ -77,6 +77,12 @@ class FaceRecognizer:
 
         return self._config.threshold
 
+    @property
+    def margin(self) -> float:
+        """Required lead over the second-best enrolled identity."""
+
+        return self._config.decision_margin
+
     def refresh(self) -> tuple[int, int, int]:
         """
         Rebuild the normalised known-vector cache.
@@ -161,6 +167,7 @@ class FaceRecognizer:
 
         return {
             "threshold": self._config.threshold,
+            "decision_margin": self._config.decision_margin,
             "known_identities": len({name for name, _ in self._known}),
             "known_embeddings": len(self._known),
             "rejected_embeddings": self._invalid_known,
@@ -247,9 +254,9 @@ class FaceRecognizer:
                 )
             )
 
-        best_name: str | None = None
-
-        best_score = -1.0
+        # Best score per identity, so the margin check compares people,
+        # not two photos of the same person.
+        best_by_identity: dict[str, float] = {}
 
         for name, known in self._known:
 
@@ -261,11 +268,31 @@ class FaceRecognizer:
 
                 continue
 
-            if score > best_score:
+            if score > best_by_identity.get(name, -1.0):
 
-                best_score = score
+                best_by_identity[name] = score
 
-                best_name = name
+        best_name: str | None = None
+
+        best_score = -1.0
+
+        second_name: str | None = None
+
+        second_score: float | None = None
+
+        if best_by_identity:
+
+            ranking = sorted(
+                best_by_identity.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+
+            best_name, best_score = ranking[0]
+
+            if len(ranking) > 1:
+
+                second_name, second_score = ranking[1]
 
         if best_name is None:
 
@@ -280,7 +307,15 @@ class FaceRecognizer:
                 )
             )
 
-        if best_score >= self._config.threshold:
+        margin = max(0.0, float(self._config.decision_margin or 0.0))
+
+        ambiguous = (
+            second_name is not None
+            and second_score is not None
+            and best_score - second_score < margin
+        )
+
+        if best_score >= self._config.threshold and not ambiguous:
 
             return self._remember(
                 RecognitionResult(
@@ -290,6 +325,30 @@ class FaceRecognizer:
                     score=best_score,
                     threshold=self._config.threshold,
                     candidate=best_name,
+                )
+            )
+
+        if ambiguous and best_score >= self._config.threshold:
+
+            return self._remember(
+                RecognitionResult(
+                    status=UNKNOWN,
+                    name="Unknown",
+                    recognized=False,
+                    score=best_score,
+                    threshold=self._config.threshold,
+                    candidate=best_name,
+                    reason=(
+                        "%s (%.3f) is only %.3f ahead of %s; "
+                        "margin %.3f"
+                        % (
+                            best_name,
+                            best_score,
+                            best_score - second_score,
+                            second_name,
+                            margin,
+                        )
+                    ),
                 )
             )
 

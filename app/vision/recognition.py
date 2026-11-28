@@ -15,6 +15,13 @@ import numpy as np
 
 
 DEFAULT_THRESHOLD = 0.55
+
+# Required gap between the best and the second-best enrolled identity.
+# Zero disables the check (the previous behaviour); the kiosk config uses
+# a small positive margin so a near-tie between two enrolled people is
+# reported as unknown instead of greeting the wrong person.
+DEFAULT_DECISION_MARGIN = 0.0
+
 DEFAULT_MIN_DETECTION_SCORE = 0.55
 DEFAULT_MIN_FACE_SIZE = 60
 DEFAULT_EMBEDDING_SIZE = 512
@@ -26,6 +33,8 @@ class RecognitionConfig:
     """Validated recognition settings."""
 
     threshold: float = DEFAULT_THRESHOLD
+
+    decision_margin: float = DEFAULT_DECISION_MARGIN
 
     min_detection_score: float = DEFAULT_MIN_DETECTION_SCORE
 
@@ -140,6 +149,13 @@ class RecognitionConfig:
 
         threshold = number("threshold", DEFAULT_THRESHOLD, -1.0, 1.0)
 
+        decision_margin = number(
+            "decision_margin",
+            DEFAULT_DECISION_MARGIN,
+            0.0,
+            2.0,
+        )
+
         min_detection = number(
             "min_detection_score",
             DEFAULT_MIN_DETECTION_SCORE,
@@ -191,6 +207,7 @@ class RecognitionConfig:
 
         return cls(
             threshold=threshold,
+            decision_margin=decision_margin,
             min_detection_score=min_detection,
             min_face_size=min_face_size,
             expected_embedding_size=embedding_size,
